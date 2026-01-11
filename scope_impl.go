@@ -11,6 +11,7 @@ import (
 type scope struct {
 	parent    *containerImpl
 	instances map[string]any
+	context   map[string]any // Context storage for request-specific data
 	mu        sync.RWMutex
 	ended     bool
 }
@@ -20,6 +21,7 @@ func newScope(parent *containerImpl) *scope {
 	return &scope{
 		parent:    parent,
 		instances: make(map[string]any),
+		context:   make(map[string]any),
 	}
 }
 
@@ -93,6 +95,7 @@ func (s *scope) End() error {
 	}
 
 	s.instances = nil
+	s.context = nil
 	s.ended = true
 
 	if len(errs) > 0 {
@@ -100,4 +103,54 @@ func (s *scope) End() error {
 	}
 
 	return nil
+}
+
+// Has checks if a service is registered (delegates to parent container).
+func (s *scope) Has(name string) bool {
+	return s.parent.Has(name)
+}
+
+// IsEnded returns true if the scope has been ended.
+func (s *scope) IsEnded() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ended
+}
+
+// Services returns a list of services resolved in this scope.
+func (s *scope) Services() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	names := make([]string, 0, len(s.instances))
+	for name := range s.instances {
+		names = append(names, name)
+	}
+	return names
+}
+
+// Parent returns the parent container.
+func (s *scope) Parent() Vessel {
+	return s.parent
+}
+
+// Set stores a value in the scope context.
+func (s *scope) Set(key string, value any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ended {
+		return // Silently ignore if scope ended
+	}
+
+	s.context[key] = value
+}
+
+// Get retrieves a value from the scope context.
+func (s *scope) Get(key string) (any, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	value, ok := s.context[key]
+	return value, ok
 }

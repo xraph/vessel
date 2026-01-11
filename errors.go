@@ -28,20 +28,29 @@ const (
 
 	// CodeScopeEnded indicates operation on an ended scope
 	CodeScopeEnded = "SCOPE_ENDED"
+
+	// CodeTypeMismatch indicates a type mismatch during service resolution
+	CodeTypeMismatch = "TYPE_MISMATCH"
 )
 
 // =============================================================================
 // SENTINEL ERRORS
 // =============================================================================
 
-// ErrInvalidFactory is returned when a nil or invalid factory is provided
+// ErrInvalidFactory is returned when a nil or invalid factory is provided.
 var ErrInvalidFactory = errs.NewError(CodeInvalidFactory, "factory cannot be nil", nil)
 
-// ErrServiceNotFoundSentinel is a sentinel error for service not found (for error checking)
+// ErrServiceNotFoundSentinel is a sentinel error for service not found (for error checking).
 var ErrServiceNotFoundSentinel = errs.NewError(CodeServiceNotFound, "service not found", nil)
 
-// ErrCircularDependencySentinel is a sentinel error for circular dependency (for error checking)
+// ErrCircularDependencySentinel is a sentinel error for circular dependency (for error checking).
 var ErrCircularDependencySentinel = errs.NewError(CodeCircularDependency, "circular dependency", nil)
+
+// ErrScopeEnded is returned when operations are attempted on an ended scope.
+var ErrScopeEnded = errs.NewError(CodeScopeEnded, "scope has ended", nil)
+
+// ErrTypeMismatchSentinel is a sentinel error for type mismatch during resolution.
+var ErrTypeMismatchSentinel = errs.NewError(CodeTypeMismatch, "type mismatch", nil)
 
 // =============================================================================
 // ERROR CONSTRUCTORS
@@ -84,5 +93,12 @@ func ErrCircularDependency(cycle []string) *errs.Error {
 	).WithContext("cycle", cycle).(*errs.Error)
 }
 
-// ErrScopeEnded is returned when operations are attempted on an ended scope
-var ErrScopeEnded = errs.NewError(CodeScopeEnded, "scope has ended", nil)
+// ErrTypeMismatch creates an error for type mismatch during resolution
+func ErrTypeMismatch(serviceName string, actual any) *errs.Error {
+	return errs.NewError(
+		CodeTypeMismatch,
+		fmt.Sprintf("service '%s' type mismatch: got %T", serviceName, actual),
+		nil,
+	).WithContext("service", serviceName).
+		WithContext("actual_type", fmt.Sprintf("%T", actual)).(*errs.Error)
+}

@@ -17,7 +17,7 @@ func TestScope_ResolveSingleton(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Resolve singleton from scope
 	val, err := scope.Resolve("singleton")
@@ -42,7 +42,7 @@ func TestScope_ResolveScoped(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// First resolve
 	val1, err := scope.Resolve("scoped")
@@ -73,7 +73,7 @@ func TestScope_ResolveScoped_DifferentScopes(t *testing.T) {
 	val1, err := scope1.Resolve("scoped")
 	assert.NoError(t, err)
 	assert.Equal(t, 1, callCount)
-	scope1.End()
+	_ = scope1.End()
 
 	// Second scope - should create new instance
 	scope2 := c.BeginScope()
@@ -81,7 +81,7 @@ func TestScope_ResolveScoped_DifferentScopes(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 2, callCount)
 	assert.NotSame(t, val1, val2)
-	scope2.End()
+	_ = scope2.End()
 }
 
 func TestScope_ResolveTransient(t *testing.T) {
@@ -96,7 +96,7 @@ func TestScope_ResolveTransient(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// First resolve
 	val1, err := scope.Resolve("transient")
@@ -114,7 +114,7 @@ func TestScope_ResolveNotFound(t *testing.T) {
 	c := New()
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	_, err := scope.Resolve("nonexistent")
 	assert.ErrorIs(t, err, ErrServiceNotFoundSentinel)
@@ -188,7 +188,7 @@ func TestScope_ConcurrentResolve(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Resolve concurrently
 	const goroutines = 10

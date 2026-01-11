@@ -116,7 +116,7 @@ func TestRegisterScoped_Generic(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	svc1, err := ResolveScope[*testService](scope, "test")
 	require.NoError(t, err)
@@ -206,7 +206,7 @@ func TestRegisterInterface_AllLifecycles(t *testing.T) {
 	svc5, _ := ResolveScope[testInterface](scope, "scoped")
 	svc6, _ := ResolveScope[testInterface](scope, "scoped")
 	assert.Same(t, svc5, svc6)
-	scope.End()
+	_ = scope.End()
 }
 
 func TestRegisterValue(t *testing.T) {
@@ -246,7 +246,7 @@ func TestRegisterScopedInterface_Convenience(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	svc1, err := ResolveScope[testInterface](scope, "test")
 	require.NoError(t, err)
@@ -281,7 +281,7 @@ func TestResolveScope_TypeSafe(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	svc, err := ResolveScope[*testService](scope, "test")
 	assert.NoError(t, err)
@@ -297,7 +297,7 @@ func TestResolveScope_TypeMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	_, err = ResolveScope[string](scope, "test")
 	assert.Error(t, err)
@@ -313,7 +313,7 @@ func TestMustScope_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	svc := MustScope[*testService](scope, "test")
 	assert.Equal(t, "scoped", svc.value)
@@ -323,7 +323,7 @@ func TestMustScope_Panic(t *testing.T) {
 	c := New()
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	assert.Panics(t, func() {
 		MustScope[*testService](scope, "nonexistent")
@@ -653,7 +653,7 @@ func TestRegisterScopedWith_Basic(t *testing.T) {
 
 	// Create scope and resolve
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	svc, err := ResolveScope[*userServiceWithDeps](scope, "userService")
 	require.NoError(t, err)

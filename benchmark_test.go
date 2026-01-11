@@ -92,7 +92,7 @@ func BenchmarkScope_Resolve_Cached(b *testing.B) {
 	}, Scoped())
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Warm up cache
 	_, _ = scope.Resolve("service")

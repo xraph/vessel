@@ -10,11 +10,12 @@ import (
 
 // containerImpl implements Container.
 type containerImpl struct {
-	services  map[string]*serviceRegistration
-	instances map[string]any
-	graph     *DependencyGraph
-	started   bool
-	mu        sync.RWMutex
+	services   map[string]*serviceRegistration
+	instances  map[string]any
+	graph      *DependencyGraph
+	middleware *middlewareChain
+	started    bool
+	mu         sync.RWMutex
 }
 
 // serviceRegistration holds service registration details.
@@ -35,9 +36,10 @@ type serviceRegistration struct {
 // newContainerImpl creates a new DI container implementation.
 func newContainerImpl() Vessel {
 	return &containerImpl{
-		services:  make(map[string]*serviceRegistration),
-		instances: make(map[string]any),
-		graph:     NewDependencyGraph(),
+		services:   make(map[string]*serviceRegistration),
+		instances:  make(map[string]any),
+		graph:      NewDependencyGraph(),
+		middleware: newMiddlewareChain(),
 	}
 }
 
@@ -95,6 +97,26 @@ func (c *containerImpl) Register(name string, factory Factory, opts ...RegisterO
 // started when first resolved. This enables Angular-like dependency injection where
 // dependencies are fully ready when resolved.
 func (c *containerImpl) Resolve(name string) (any, error) {
+	ctx := context.Background()
+
+	// Call middleware before resolve
+	if err := c.middleware.beforeResolve(ctx, name); err != nil {
+		return nil, err
+	}
+
+	// Perform actual resolution
+	service, err := c.resolveInternal(name)
+
+	// Call middleware after resolve
+	if mwErr := c.middleware.afterResolve(ctx, name, service, err); mwErr != nil {
+		return nil, mwErr
+	}
+
+	return service, err
+}
+
+// resolveInternal performs the actual service resolution without middleware.
+func (c *containerImpl) resolveInternal(name string) (any, error) {
 	c.mu.RLock()
 	reg, exists := c.services[name]
 	c.mu.RUnlock()
@@ -143,8 +165,22 @@ func (c *containerImpl) Resolve(name string) (any, error) {
 		// Auto-start if service implements di.Service and not yet started
 		if !reg.started {
 			if svc, ok := existingInstance.(di.Service); ok {
-				if err := svc.Start(context.Background()); err != nil {
-					return nil, NewServiceError(name, "auto_start", err)
+				ctx := context.Background()
+
+				// Call middleware before start
+				if err := c.middleware.beforeStart(ctx, name); err != nil {
+					return nil, err
+				}
+
+				startErr := svc.Start(ctx)
+
+				// Call middleware after start
+				if mwErr := c.middleware.afterStart(ctx, name, startErr); mwErr != nil {
+					return nil, mwErr
+				}
+
+				if startErr != nil {
+					return nil, NewServiceError(name, "auto_start", startErr)
 				}
 			}
 
@@ -167,12 +203,34 @@ func (c *containerImpl) Resolve(name string) (any, error) {
 
 	// Auto-start transient services that implement di.Service
 	if svc, ok := instance.(di.Service); ok {
-		if err := svc.Start(context.Background()); err != nil {
-			return nil, NewServiceError(name, "auto_start", err)
+		ctx := context.Background()
+
+		// Call middleware before start
+		if err := c.middleware.beforeStart(ctx, name); err != nil {
+			return nil, err
+		}
+
+		startErr := svc.Start(ctx)
+
+		// Call middleware after start
+		if mwErr := c.middleware.afterStart(ctx, name, startErr); mwErr != nil {
+			return nil, mwErr
+		}
+
+		if startErr != nil {
+			return nil, NewServiceError(name, "auto_start", startErr)
 		}
 	}
 
 	return instance, nil
+}
+
+// Use adds middleware to the container.
+// Middleware is called in the order they are added.
+func (c *containerImpl) Use(middleware Middleware) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.middleware.add(middleware)
 }
 
 // Has checks if a service is registered.
@@ -376,6 +434,18 @@ func (c *containerImpl) Inspect(name string) ServiceInfo {
 		healthy = checker.Health(context.Background()) == nil
 	}
 
+	// Copy metadata and add groups
+	metadata := make(map[string]string)
+	for k, v := range reg.metadata {
+		metadata[k] = v
+	}
+
+	// Store groups in metadata for query purposes
+	if len(reg.groups) > 0 {
+		// Store groups as comma-separated string
+		metadata["__groups"] = joinStrings(reg.groups, ",")
+	}
+
 	return ServiceInfo{
 		Name:         name,
 		Type:         typeName,
@@ -384,7 +454,7 @@ func (c *containerImpl) Inspect(name string) ServiceInfo {
 		Deps:         reg.deps,
 		Started:      reg.started,
 		Healthy:      healthy,
-		Metadata:     reg.metadata,
+		Metadata:     metadata,
 	}
 }
 
@@ -451,4 +521,16 @@ func (c *containerImpl) stopServices(ctx context.Context, names []string) {
 	for i := len(names) - 1; i >= 0; i-- {
 		_ = c.stopService(ctx, names[i])
 	}
+}
+
+// joinStrings is a helper to join strings.
+func joinStrings(strs []string, sep string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	result := strs[0]
+	for i := 1; i < len(strs); i++ {
+		result += sep + strs[i]
+	}
+	return result
 }

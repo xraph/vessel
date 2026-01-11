@@ -194,6 +194,36 @@ func MustScope[T any](s Scope, name string) T {
 	return instance
 }
 
+// SetScoped stores a typed value in the scope context.
+func SetScoped[T any](s Scope, key string, value T) {
+	// Type assertion to access Set method
+	if scopeImpl, ok := s.(*scope); ok {
+		scopeImpl.Set(key, value)
+	}
+}
+
+// GetScoped retrieves a typed value from the scope context.
+func GetScoped[T any](s Scope, key string) (T, bool) {
+	var zero T
+
+	// Type assertion to access Get method
+	if scopeImpl, ok := s.(*scope); ok {
+		value, ok := scopeImpl.Get(key)
+		if !ok {
+			return zero, false
+		}
+
+		result, ok := value.(T)
+		if !ok {
+			return zero, false
+		}
+
+		return result, true
+	}
+
+	return zero, false
+}
+
 // GetLogger resolves the logger from the container
 // This is a convenience function for resolving the logger service
 // The logger type is defined in the forge package, so this returns interface{}

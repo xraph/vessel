@@ -193,7 +193,7 @@ func TestScope_ResolveTransient_NonService(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Resolve transient from scope
 	val, err := scope.Resolve("test")
@@ -337,7 +337,7 @@ func TestScope_ResolveScopedWithError(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Resolve should return factory error
 	_, err = scope.Resolve("test")
@@ -374,7 +374,7 @@ func TestScope_ResolveSingleton_FromScope(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Resolve singleton from scope - should use parent container
 	val1, err := scope.Resolve("test")
@@ -399,7 +399,7 @@ func TestScope_ResolveScoped_Cached(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// First resolve
 	val1, err := scope.Resolve("test")
@@ -423,7 +423,7 @@ func TestScope_ResolveTransient_Error(t *testing.T) {
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
-	defer scope.End()
+	defer func() { _ = scope.End() }()
 
 	// Resolve should return factory error
 	_, err = scope.Resolve("test")
