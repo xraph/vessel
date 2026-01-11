@@ -678,22 +678,46 @@ if errors.Is(err, vessel.ErrScopeEnded) {
 Vessel is optimized for production use:
 
 ```
-BenchmarkResolve_Singleton_Cached-16     100M    12.0 ns/op    0 B/op
-BenchmarkResolve_Transient-16             95M    12.8 ns/op    0 B/op
-BenchmarkScope_Create-16                  20M    58.6 ns/op   96 B/op
-BenchmarkScope_Resolve_Cached-16          75M    15.6 ns/op    0 B/op
-BenchmarkStart_10Services-16             348K     3.3 μs/op    0 B/op
-BenchmarkStart_100Services-16             46K    26.4 μs/op    0 B/op
-BenchmarkConcurrentResolve-16              8M     150 ns/op    0 B/op
-BenchmarkConcurrentScope-16                6M     182 ns/op    0 B/op
+BenchmarkResolve_Singleton_Cached-16     100M    12.00 ns/op     0 B/op    0 allocs/op
+BenchmarkResolve_Transient-16             94M    12.78 ns/op     0 B/op    0 allocs/op
+BenchmarkScope_Create-16                  21M    56.46 ns/op   160 B/op    3 allocs/op
+BenchmarkScope_Resolve_Cached-16          77M    15.60 ns/op     0 B/op    0 allocs/op
+BenchmarkStart_10Services-16             351K     3.34 μs/op  6960 B/op   86 allocs/op
+BenchmarkStart_100Services-16             45K    26.34 μs/op 58709 B/op  857 allocs/op
+BenchmarkConcurrentResolve-16              8M      152 ns/op     0 B/op    0 allocs/op
+BenchmarkConcurrentScope-16                7M      181 ns/op   448 B/op    4 allocs/op
 ```
 
-Key performance characteristics:
-- **Cached singleton resolve**: ~12ns
-- **Transient service creation**: ~13ns
-- **Scope creation**: ~59ns
-- **Scoped service resolve**: ~16ns (cached in scope)
-- **Thread-safe**: No performance penalty for concurrent access
+### Understanding the Benchmarks
+
+**Resolve_Singleton_Cached** - Resolving an already-created singleton service. This is the most common operation in production. At ~12ns with zero allocations, it's essentially just a map lookup with a mutex read lock.
+
+**Resolve_Transient** - Creating a new transient service instance each time. At ~13ns, the factory function is called but the service itself is simple (no dependencies), showing the framework's low overhead.
+
+**Scope_Create** - Creating a new scope (e.g., for an HTTP request). At ~56ns with 160 bytes allocated, this is lightweight enough to create per-request without performance concerns.
+
+**Scope_Resolve_Cached** - Resolving a scoped service that's already been created in the current scope. At ~16ns with zero allocations, subsequent resolutions within the same scope are very fast.
+
+**Start_10Services** / **Start_100Services** - Starting services with lifecycle hooks. These scale linearly (~3.3μs for 10 services, ~26μs for 100 services), showing efficient startup even with many services. This happens once at application startup.
+
+**ConcurrentResolve** - Multiple goroutines resolving the same singleton simultaneously. At ~152ns, the mutex contention is minimal, making Vessel safe for high-concurrency scenarios.
+
+**ConcurrentScope** - Multiple goroutines creating and using separate scopes simultaneously. At ~181ns, isolated scopes have minimal contention, ideal for concurrent request handling.
+
+### Key Performance Characteristics
+
+- **Cached singleton resolve**: ~12ns (zero allocations) - The hot path for most applications
+- **Transient service creation**: ~13ns (zero allocations) - Minimal framework overhead
+- **Scope creation**: ~56ns (160 bytes, 3 allocations) - Efficient per-request scoping
+- **Scoped service resolve**: ~16ns cached (zero allocations) - Fast repeated access within scope
+- **Thread-safe**: Minimal contention under concurrent load (~10x slower than single-threaded)
+- **Startup**: Linear scaling, ~260ns per service with lifecycle management
+
+**What This Means for Your Application:**
+- You can resolve services millions of times per second
+- Creating scopes per HTTP request adds negligible overhead (~56ns)
+- Concurrent access is safe and efficient for high-throughput services
+- Startup time is predictable and scales with service count
 
 ## 🛠️ Best Practices
 
