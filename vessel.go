@@ -19,5 +19,5 @@ type ServiceInfo = di.ServiceInfo
 
 // New creates a new DI container.
 func New() Vessel {
-	return newContainer()
+	return newContainerImpl()
 }

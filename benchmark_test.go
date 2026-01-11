@@ -7,9 +7,8 @@ import (
 
 // Benchmark service registration.
 func BenchmarkRegister_Singleton(b *testing.B) {
-	c := New()
-
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
+		c := New()
 		name := "service"
 		_ = c.Register(name, func(c Vessel) (any, error) {
 			return "value", nil
@@ -18,9 +17,8 @@ func BenchmarkRegister_Singleton(b *testing.B) {
 }
 
 func BenchmarkRegister_Transient(b *testing.B) {
-	c := New()
-
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
+		c := New()
 		name := "service"
 		_ = c.Register(name, func(c Vessel) (any, error) {
 			return "value", nil
@@ -29,9 +27,8 @@ func BenchmarkRegister_Transient(b *testing.B) {
 }
 
 func BenchmarkRegister_Scoped(b *testing.B) {
-	c := New()
-
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
+		c := New()
 		name := "service"
 		_ = c.Register(name, func(c Vessel) (any, error) {
 			return "value", nil
@@ -49,7 +46,7 @@ func BenchmarkResolve_Singleton_Cached(b *testing.B) {
 	// Warm up cache
 	_, _ = c.Resolve("service")
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, _ = c.Resolve("service")
 	}
 }
@@ -73,7 +70,7 @@ func BenchmarkResolve_Transient(b *testing.B) {
 		return "value", nil
 	}, Transient())
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, _ = c.Resolve("service")
 	}
 }
@@ -82,7 +79,7 @@ func BenchmarkResolve_Transient(b *testing.B) {
 func BenchmarkScope_Create(b *testing.B) {
 	c := New()
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		scope := c.BeginScope()
 		_ = scope.End()
 	}
@@ -100,7 +97,7 @@ func BenchmarkScope_Resolve_Cached(b *testing.B) {
 	// Warm up cache
 	_, _ = scope.Resolve("service")
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, _ = scope.Resolve("service")
 	}
 }
@@ -111,28 +108,16 @@ func BenchmarkScope_Resolve_Uncached(b *testing.B) {
 		return "value", nil
 	}, Scoped())
 
-	for b.Loop() {
-		b.StopTimer()
-
+	for i := 0; i < b.N; i++ {
 		scope := c.BeginScope()
-
-		b.StartTimer()
-
 		_, _ = scope.Resolve("service")
-
-		b.StopTimer()
-
 		_ = scope.End()
-
-		b.StartTimer()
 	}
 }
 
 // Benchmark lifecycle operations.
 func BenchmarkStart_10Services(b *testing.B) {
-	for b.Loop() {
-		b.StopTimer()
-
+	for i := 0; i < b.N; i++ {
 		c := New()
 
 		for j := range 10 {
@@ -142,17 +127,13 @@ func BenchmarkStart_10Services(b *testing.B) {
 			})
 		}
 
-		b.StartTimer()
-
 		ctx := context.Background()
 		_ = c.Start(ctx)
 	}
 }
 
 func BenchmarkStart_100Services(b *testing.B) {
-	for b.Loop() {
-		b.StopTimer()
-
+	for i := 0; i < b.N; i++ {
 		c := New()
 
 		for j := range 100 {
@@ -161,8 +142,6 @@ func BenchmarkStart_100Services(b *testing.B) {
 				return &mockService{name: name, healthy: true}, nil
 			})
 		}
-
-		b.StartTimer()
 
 		ctx := context.Background()
 		_ = c.Start(ctx)
@@ -182,7 +161,8 @@ func BenchmarkHealth_10Services(b *testing.B) {
 	ctx := context.Background()
 	_ = c.Start(ctx)
 
-	for b.Loop() {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
 		_ = c.Health(ctx)
 	}
 }
@@ -200,7 +180,8 @@ func BenchmarkHealth_100Services(b *testing.B) {
 	ctx := context.Background()
 	_ = c.Start(ctx)
 
-	for b.Loop() {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
 		_ = c.Health(ctx)
 	}
 }
@@ -215,7 +196,7 @@ func BenchmarkResolveGeneric(b *testing.B) {
 	// Warm up cache
 	_, _ = Resolve[*mockService](c, "service")
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, _ = Resolve[*mockService](c, "service")
 	}
 }
@@ -229,7 +210,7 @@ func BenchmarkMust(b *testing.B) {
 	// Warm up cache
 	_ = Must[*mockService](c, "service")
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_ = Must[*mockService](c, "service")
 	}
 }

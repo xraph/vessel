@@ -26,9 +26,6 @@ const (
 	// CodeCircularDependency indicates a circular dependency was detected
 	CodeCircularDependency = "CIRCULAR_DEPENDENCY"
 
-	// CodeTypeMismatch indicates a type assertion or cast failed
-	CodeTypeMismatch = "TYPE_MISMATCH"
-
 	// CodeScopeEnded indicates operation on an ended scope
 	CodeScopeEnded = "SCOPE_ENDED"
 )
@@ -85,16 +82,6 @@ func ErrCircularDependency(cycle []string) *errs.Error {
 		fmt.Sprintf("circular dependency detected: %v", cycle),
 		nil,
 	).WithContext("cycle", cycle).(*errs.Error)
-}
-
-// ErrTypeMismatch creates an error for type assertion failures
-func ErrTypeMismatch(expected, actual string) *errs.Error {
-	return errs.NewError(
-		CodeTypeMismatch,
-		fmt.Sprintf("type mismatch: expected %s, got %s", expected, actual),
-		nil,
-	).WithContext("expected", expected).
-		WithContext("actual", actual).(*errs.Error)
 }
 
 // ErrScopeEnded is returned when operations are attempted on an ended scope

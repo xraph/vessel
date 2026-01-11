@@ -49,7 +49,7 @@ func ResolveReady[T any](ctx context.Context, c Vessel, name string) (T, error) 
 
 	typed, ok := instance.(T)
 	if !ok {
-		return zero, fmt.Errorf("%w: service %s is not of type %T", ErrTypeMismatch("", ""), name, zero)
+		return zero, fmt.Errorf("service %s: type mismatch, expected %T but got %T", name, zero, instance)
 	}
 
 	return typed, nil
@@ -88,112 +88,48 @@ func RegisterScoped[T any](c Vessel, name string, factory func(Vessel) (T, error
 }
 
 // RegisterSingletonWith registers a singleton service with typed dependency injection.
-// Accepts InjectOption arguments followed by a factory function.
+// This is a convenience wrapper around Provide with Singleton lifecycle.
 //
 // Usage:
 //
-//	di.RegisterSingletonWith[*UserService](c, "userService",
-//	    di.Inject[*bun.DB]("database"),
-//	    func(db *bun.DB) (*UserService, error) {
+//	vessel.RegisterSingletonWith[*UserService](c, "userService",
+//	    vessel.Inject[*DB]("database"),
+//	    func(db *DB) (*UserService, error) {
 //	        return &UserService{db: db}, nil
 //	    },
 //	)
 func RegisterSingletonWith[T any](c Vessel, name string, args ...any) error {
-	return registerWithLifecycle[T](c, name, Singleton(), args...)
+	return ProvideWithOpts[T](c, name, []di.RegisterOption{Singleton()}, args...)
 }
 
 // RegisterTransientWith registers a transient service with typed dependency injection.
-// Accepts InjectOption arguments followed by a factory function.
+// This is a convenience wrapper around Provide with Transient lifecycle.
 //
 // Usage:
 //
-//	di.RegisterTransientWith[*Request](c, "request",
-//	    di.Inject[*Context]("ctx"),
+//	vessel.RegisterTransientWith[*Request](c, "request",
+//	    vessel.Inject[*Context]("ctx"),
 //	    func(ctx *Context) (*Request, error) {
 //	        return &Request{ctx: ctx}, nil
 //	    },
 //	)
 func RegisterTransientWith[T any](c Vessel, name string, args ...any) error {
-	return registerWithLifecycle[T](c, name, Transient(), args...)
+	return ProvideWithOpts[T](c, name, []di.RegisterOption{Transient()}, args...)
 }
 
 // RegisterScopedWith registers a scoped service with typed dependency injection.
-// Accepts InjectOption arguments followed by a factory function.
+// This is a convenience wrapper around Provide with Scoped lifecycle.
 //
 // Usage:
 //
-//	di.RegisterScopedWith[*Session](c, "session",
-//	    di.Inject[*User]("user"),
+//	vessel.RegisterScopedWith[*Session](c, "session",
+//	    vessel.Inject[*User]("user"),
 //	    func(user *User) (*Session, error) {
 //	        return &Session{user: user}, nil
 //	    },
 //	)
 func RegisterScopedWith[T any](c Vessel, name string, args ...any) error {
-	return registerWithLifecycle[T](c, name, Scoped(), args...)
-}
-
-// registerWithLifecycle handles typed injection patterns.
-func registerWithLifecycle[T any](c Vessel, name string, lifecycle RegisterOption, args ...any) error {
-	if len(args) == 0 {
-		return fmt.Errorf("register %s: no factory function provided", name)
-	}
-
-	// Collect InjectOptions and find the factory function
-	var (
-		injectOpts   []InjectOption
-		factoryFn    any
-		registerOpts []RegisterOption
-	)
-
-	registerOpts = append(registerOpts, lifecycle)
-
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case InjectOption:
-			injectOpts = append(injectOpts, v)
-		case RegisterOption:
-			registerOpts = append(registerOpts, v)
-		default:
-			// Assume it's the factory function
-			if factoryFn != nil {
-				return fmt.Errorf("register %s: multiple factory functions provided", name)
-			}
-
-			factoryFn = arg
-		}
-	}
-
-	if factoryFn == nil {
-		return fmt.Errorf("register %s: no factory function provided", name)
-	}
-
-	// Extract dependencies for the graph
-	deps := ExtractDeps(injectOpts)
-
-	// Create the wrapper factory that resolves dependencies
-	factory := func(container Vessel) (any, error) {
-		// Resolve all dependencies according to their modes
-		resolvedDeps := make([]any, len(injectOpts))
-
-		for i, opt := range injectOpts {
-			resolved, err := resolveDep(container, opt)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve dependency %s: %w", opt.Dep.Name, err)
-			}
-
-			resolvedDeps[i] = resolved
-		}
-
-		// Call the factory function with resolved dependencies
-		return callFactory(factoryFn, resolvedDeps)
-	}
-
-	// Merge deps into options
-	if len(deps) > 0 {
-		registerOpts = append(registerOpts, di.WithDeps(deps...))
-	}
-
-	return c.Register(name, factory, registerOpts...)
+	return ProvideWithOpts[T](c, name, []di.RegisterOption{Scoped()}, args...)
 }
 
 // RegisterInterface registers an implementation as an interface
@@ -242,7 +178,7 @@ func ResolveScope[T any](s Scope, name string) (T, error) {
 
 	typed, ok := instance.(T)
 	if !ok {
-		return zero, fmt.Errorf("%w: service %s is not of type %T", ErrTypeMismatch("", ""), name, zero)
+		return zero, fmt.Errorf("service %s: type mismatch, expected %T but got %T", name, zero, instance)
 	}
 
 	return typed, nil
@@ -263,17 +199,7 @@ func MustScope[T any](s Scope, name string) T {
 // The logger type is defined in the forge package, so this returns interface{}
 // and should be type-asserted to the appropriate logger interface.
 func GetLogger(c Vessel) (logger.Logger, error) {
-	l, err := c.Resolve("logger")
-	if err != nil {
-		return nil, err
-	}
-
-	log, ok := l.(logger.Logger)
-	if !ok {
-		return nil, fmt.Errorf("resolved instance is not Logger, got %T", l)
-	}
-
-	return log, nil
+	return Resolve[logger.Logger](c, "logger")
 }
 
 // GetMetrics resolves the metrics from the container
@@ -293,20 +219,3 @@ func GetMetrics(c Vessel) (metrics.Metrics, error) {
 
 	return metrics, nil
 }
-
-// GetHealthManager is deprecated and will be removed.
-// The HealthManager type is not defined in the di package.
-// TODO: Remove this function or implement proper health management
-// func GetHealthManager(c Vessel) (di.HealthManager, error) {
-// 	hm, err := c.Resolve(di.HealthManagerKey)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-//
-// 	healthManager, ok := hm.(di.HealthManager)
-// 	if !ok {
-// 		return nil, fmt.Errorf("resolved instance is not HealthManager, got %T", hm)
-// 	}
-//
-// 	return healthManager, nil
-// }
