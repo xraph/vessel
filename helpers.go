@@ -20,7 +20,7 @@ func Resolve[T any](c Vessel, name string) (T, error) {
 
 	typed, ok := instance.(T)
 	if !ok {
-		return zero, fmt.Errorf("%w: service %s is not of type %T", ErrTypeMismatch("", ""), name, zero)
+		return zero, fmt.Errorf("service %s: type mismatch, expected %T but got %T", name, zero, instance)
 	}
 
 	return typed, nil

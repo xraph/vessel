@@ -48,7 +48,8 @@ func TestResolve_TypeMismatch(t *testing.T) {
 
 	// Resolve with wrong type
 	_, err = Resolve[string](c, "test")
-	assert.ErrorIs(t, err, ErrTypeMismatch("", ""))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "type mismatch")
 }
 
 func TestResolveHelper_NotFound(t *testing.T) {
@@ -299,7 +300,8 @@ func TestResolveScope_TypeMismatch(t *testing.T) {
 	defer scope.End()
 
 	_, err = ResolveScope[string](scope, "test")
-	assert.ErrorIs(t, err, ErrTypeMismatch("", ""))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "type mismatch")
 }
 
 func TestMustScope_Success(t *testing.T) {
@@ -393,7 +395,8 @@ func TestResolveReady_TypeMismatch(t *testing.T) {
 
 	// ResolveReady with wrong type
 	_, err = ResolveReady[string](ctx, c, "test")
-	assert.ErrorIs(t, err, ErrTypeMismatch("", ""))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "type mismatch")
 }
 
 func TestResolveReady_Helper_NotFound(t *testing.T) {
