@@ -10,12 +10,13 @@ import (
 
 // containerImpl implements Container.
 type containerImpl struct {
-	services   map[string]*serviceRegistration
-	instances  map[string]any
-	graph      *DependencyGraph
-	middleware *middlewareChain
-	started    bool
-	mu         sync.RWMutex
+	services     map[string]*serviceRegistration
+	instances    map[string]any
+	graph        *DependencyGraph
+	middleware   *middlewareChain
+	typeRegistry *typeRegistry // Type-based registry for dig-like constructor injection
+	started      bool
+	mu           sync.RWMutex
 }
 
 // serviceRegistration holds service registration details.
@@ -36,10 +37,11 @@ type serviceRegistration struct {
 // newContainerImpl creates a new DI container implementation.
 func newContainerImpl() Vessel {
 	return &containerImpl{
-		services:   make(map[string]*serviceRegistration),
-		instances:  make(map[string]any),
-		graph:      NewDependencyGraph(),
-		middleware: newMiddlewareChain(),
+		services:     make(map[string]*serviceRegistration),
+		instances:    make(map[string]any),
+		graph:        NewDependencyGraph(),
+		middleware:   newMiddlewareChain(),
+		typeRegistry: newTypeRegistry(),
 	}
 }
 

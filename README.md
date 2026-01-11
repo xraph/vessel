@@ -8,6 +8,7 @@
 
 ## 🆕 What's New
 
+- **🏗️ Constructor Injection** - Uber dig-style constructor-based DI with automatic dependency resolution using `ProvideConstructor`
 - **🔑 Typed Service Keys** - Strongly-typed service keys with `ServiceKey[T]` for compile-time safety and IDE autocomplete
 - **🪝 Middleware System** - Hook into service resolution and lifecycle events for logging, metrics, and validation
 - **📚 Batch Registration** - Register multiple services efficiently with `RegisterServices()` and typed variants
@@ -18,7 +19,8 @@
 ## ✨ Features
 
 - 🎯 **Type-Safe Generics** - Compile-time type safety with Go generics
-- � **Typed Service Keys** - Strongly-typed service keys for compile-time safety
+- 🏗️ **Constructor Injection** - Uber dig-style automatic dependency resolution
+- 🔑 **Typed Service Keys** - Strongly-typed service keys for compile-time safety
 - 🔄 **Multiple Lifecycles** - Singleton, Transient, and Scoped services
 - ⚡ **Lazy Dependencies** - Defer expensive service initialization
 - 🔗 **Typed Injection** - Automatic dependency resolution with type checking
@@ -191,6 +193,194 @@ userService := vessel.MustWithKey(c, UserServiceKey)
 if vessel.HasKey(c, DatabaseKey) {
     // Service is registered
 }
+```
+
+## 🏗️ Constructor Injection (Dig-Style)
+
+Vessel supports Uber dig-style constructor-based dependency injection with automatic resolution:
+
+```go
+// Simple constructor - dependencies are automatically resolved by type
+type Database struct{}
+type Logger struct{}
+
+type UserService struct {
+    db  *Database
+    log *Logger
+}
+
+func NewDatabase() *Database {
+    return &Database{}
+}
+
+func NewLogger() *Logger {
+    return &Logger{}
+}
+
+func NewUserService(db *Database, log *Logger) *UserService {
+    return &UserService{db: db, log: log}
+}
+
+c := vessel.New()
+
+// Register constructors - dependencies are automatically resolved
+vessel.ProvideConstructor(c, NewDatabase)
+vessel.ProvideConstructor(c, NewLogger)
+vessel.ProvideConstructor(c, NewUserService)
+
+// Resolve by type
+userService, err := vessel.InjectType[*UserService](c)
+```
+
+### Constructor Options
+
+```go
+// Named services
+vessel.ProvideConstructor(c, NewPrimaryDB, vessel.WithName("primary"))
+vessel.ProvideConstructor(c, NewSecondaryDB, vessel.WithName("secondary"))
+
+// Resolve named services
+primary, _ := vessel.InjectNamed[*Database](c, "primary")
+secondary, _ := vessel.InjectNamed[*Database](c, "secondary")
+
+// Check existence
+if vessel.HasType[*Database](c) { /* ... */ }
+if vessel.HasTypeNamed[*Database](c, "primary") { /* ... */ }
+
+// Lifecycle options
+vessel.ProvideConstructor(c, NewDB, vessel.AsSingleton())  // default
+vessel.ProvideConstructor(c, NewReq, vessel.AsTransient())
+vessel.ProvideConstructor(c, NewSession, vessel.AsScoped())
+```
+
+### Value Groups
+
+Collect multiple implementations of the same type:
+
+```go
+// Register multiple handlers in a group
+vessel.ProvideConstructor(c, NewAuthHandler, vessel.AsGroup("handlers"))
+vessel.ProvideConstructor(c, NewLoggingHandler, vessel.AsGroup("handlers"))
+vessel.ProvideConstructor(c, NewMetricsHandler, vessel.AsGroup("handlers"))
+
+// Inject all handlers as a slice
+handlers, err := vessel.InjectGroup[Handler](c, "handlers")
+// handlers is []Handler containing all three handlers
+```
+
+### Interface Registration
+
+Register concrete types as interfaces:
+
+```go
+type Writer interface {
+    Write([]byte) error
+}
+
+type FileWriter struct{}
+func (f *FileWriter) Write(b []byte) error { return nil }
+
+func NewFileWriter() *FileWriter {
+    return &FileWriter{}
+}
+
+// Register *FileWriter as Writer interface
+vessel.ProvideConstructor(c, NewFileWriter, vessel.As(new(Writer)))
+
+// Resolve by interface type
+writer, err := vessel.InjectType[Writer](c)
+```
+
+### In/Out Parameter Objects (dig-style)
+
+For constructors with many dependencies, use `In` and `Out` structs:
+
+```go
+// Embed vessel.In for parameter objects
+type ServiceParams struct {
+    vessel.In
+    
+    DB       *Database           // Required dependency
+    Logger   *Logger             // Required dependency
+    Cache    *Cache `optional:"true"` // Optional, nil if not registered
+    Primary  *Database `name:"primary"` // Named dependency
+}
+
+func NewService(p ServiceParams) *Service {
+    return &Service{
+        db:      p.DB,
+        logger:  p.Logger,
+        cache:   p.Cache,
+        primary: p.Primary,
+    }
+}
+
+vessel.ProvideConstructor(c, NewService)
+
+// Embed vessel.Out for result objects (multiple results)
+type ServiceResults struct {
+    vessel.Out
+    
+    API  *APIHandler
+    Web  *WebHandler
+    GRPC *GRPCHandler
+}
+
+func NewHandlers(db *Database) ServiceResults {
+    return ServiceResults{
+        API:  &APIHandler{db: db},
+        Web:  &WebHandler{db: db},
+        GRPC: &GRPCHandler{db: db},
+    }
+}
+
+// All three handlers are registered and resolvable
+vessel.ProvideConstructor(c, NewHandlers)
+api, _ := vessel.InjectType[*APIHandler](c)
+web, _ := vessel.InjectType[*WebHandler](c)
+```
+
+### Error Handling
+
+Constructors can return errors:
+
+```go
+func NewDatabase(cfg *Config) (*Database, error) {
+    if cfg.ConnectionString == "" {
+        return nil, errors.New("connection string required")
+    }
+    return &Database{conn: cfg.ConnectionString}, nil
+}
+
+// Error is returned when resolving
+db, err := vessel.InjectType[*Database](c)
+if err != nil {
+    // Handle constructor error
+}
+```
+
+### Must Variants (Panic on Error)
+
+```go
+// Panic if service not found or resolution fails
+db := vessel.MustInjectType[*Database](c)
+primary := vessel.MustInjectNamed[*Database](c, "primary")
+handlers := vessel.MustInjectGroup[Handler](c, "handlers")
+```
+
+### Circular Dependency Detection
+
+Vessel automatically detects circular dependencies:
+
+```go
+func NewA(b *B) *A { return &A{b: b} }
+func NewB(a *A) *B { return &B{a: a} } // Circular!
+
+vessel.ProvideConstructor(c, NewA)
+vessel.ProvideConstructor(c, NewB)
+
+_, err := vessel.InjectType[*A](c)
+// Error: circular dependency detected: *A -> *B -> *A
 ```
 
 ## 🪝 Middleware & Hooks
@@ -722,17 +912,19 @@ BenchmarkConcurrentScope-16                7M      181 ns/op   448 B/op    4 all
 ## 🛠️ Best Practices
 
 1. **Register services at startup** - Keep container immutable after initialization
-2. **Use typed service keys** - Prefer `ServiceKey[T]` over strings for type safety
-3. **Use generics for type safety** - Avoid `any` and type assertions
-4. **Implement service lifecycle** - Use Start/Stop for resource management
-5. **Leverage scopes for requests** - Create new scopes for HTTP handlers
-6. **Use scope context storage** - Store request-specific data with `SetScoped/GetScoped`
-7. **Use lazy dependencies sparingly** - Only for circular dependencies or expensive resources
-8. **Declare dependencies explicitly** - Use `WithDependencies()` for documentation
-9. **Use middleware for cross-cutting concerns** - Logging, metrics, security validation
-10. **Query services for discovery** - Use `Query()` and `FindByGroup()` for dynamic service discovery
-11. **Batch register related services** - Use `RegisterServices()` for cleaner code
-12. **Test with mocks** - Create fresh containers per test with mock services
+2. **Use constructor injection** - Prefer `ProvideConstructor` for cleaner, dig-like dependency resolution
+3. **Use typed service keys** - Prefer `ServiceKey[T]` over strings for type safety
+4. **Use generics for type safety** - Avoid `any` and type assertions
+5. **Implement service lifecycle** - Use Start/Stop for resource management
+6. **Leverage scopes for requests** - Create new scopes for HTTP handlers
+7. **Use scope context storage** - Store request-specific data with `SetScoped/GetScoped`
+8. **Use In/Out structs for complex constructors** - Embed `vessel.In` or `vessel.Out` for many dependencies
+9. **Use lazy dependencies sparingly** - Only for circular dependencies or expensive resources
+10. **Declare dependencies explicitly** - Use `WithDependencies()` for documentation
+11. **Use middleware for cross-cutting concerns** - Logging, metrics, security validation
+12. **Query services for discovery** - Use `Query()` and `FindByGroup()` for dynamic service discovery
+13. **Batch register related services** - Use `RegisterServices()` for cleaner code
+14. **Test with mocks** - Create fresh containers per test with mock services
 
 ## 🔄 Migration from Other DI Containers
 
@@ -768,11 +960,42 @@ func InitializeApp() (*App, error) {
 c := dig.New()
 c.Provide(NewDatabase)
 c.Provide(NewUserService)
+c.Invoke(func(s *UserService) {
+    // use service
+})
 
-// After (vessel)
+// After (vessel) - dig-style constructor injection
 c := vessel.New()
-vessel.RegisterSingleton(c, "database", NewDatabase)
-vessel.RegisterSingleton(c, "userService", NewUserService)
+vessel.ProvideConstructor(c, NewDatabase)
+vessel.ProvideConstructor(c, NewUserService)
+userService, _ := vessel.InjectType[*UserService](c)
+
+// dig In/Out structs are fully supported
+type Params struct {
+    dig.In  // Change to vessel.In
+    DB *Database
+}
+
+// becomes
+type Params struct {
+    vessel.In
+    DB *Database
+}
+
+// Optional, named, and group tags work the same way
+type Deps struct {
+    vessel.In
+    Cache   *Cache `optional:"true"`
+    Primary *DB    `name:"primary"`
+}
+
+// Value groups
+c.Provide(NewHandler, dig.Group("handlers"))  // dig
+vessel.ProvideConstructor(c, NewHandler, vessel.AsGroup("handlers"))  // vessel
+
+// Interface registration
+c.Provide(NewFileWriter, dig.As(new(io.Writer)))  // dig
+vessel.ProvideConstructor(c, NewFileWriter, vessel.As(new(io.Writer)))  // vessel
 ```
 
 ## 📚 Complete Example
