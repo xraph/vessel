@@ -17,6 +17,7 @@ type constructorConfig struct {
 	group     string         // Add to a value group
 	asTypes   []reflect.Type // Register as additional interface types
 	lifecycle string         // Service lifecycle (default: "singleton")
+	eager     bool           // Instantiate immediately after registration
 }
 
 // constructorOptionFunc is a function adapter for ConstructorOption
@@ -37,21 +38,25 @@ func WithName(name string) ConstructorOption {
 	})
 }
 
-// WithAliases registers the constructor result under additional names.
-// This allows retrieving the same service instance using different names.
-// Use empty string ("") as an alias to also register without a name.
+// WithAliases registers the constructor result under additional named variants.
+// The primary registration is by TYPE (unnamed), and aliases provide named access.
+// This allows the service to be resolved both by type and by name.
 //
 // Example:
 //
-//	// Register with primary name "manager" and also accessible without name
-//	ProvideConstructor(c, NewDatabaseManager, WithName("manager"), WithAliases(""))
+//	// Register by type with named aliases
+//	ProvideConstructor(c, NewDatabaseManager, WithAliases("manager", "db-manager"))
 //
-//	// Can now resolve both ways:
-//	manager1, _ := InjectNamed[*DatabaseManager](c, "manager")
-//	manager2, _ := InjectType[*DatabaseManager](c)  // Same instance
+//	// Can resolve by type (unnamed):
+//	mgr1, _ := InjectType[*DatabaseManager](c)
 //
-//	// Multiple aliases
-//	ProvideConstructor(c, NewCache, WithName("primary"), WithAliases("default", "main"))
+//	// Or by any alias name:
+//	mgr2, _ := InjectNamed[*DatabaseManager](c, "manager")
+//	mgr3, _ := InjectNamed[*DatabaseManager](c, "db-manager")
+//	// mgr1 == mgr2 == mgr3 (same singleton instance)
+//
+// Note: If you use WithName(), that becomes the primary name and aliases are additional.
+// Using only WithAliases() keeps the service unnamed (type-based) as primary.
 func WithAliases(names ...string) ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
 		c.aliases = append(c.aliases, names...)
@@ -108,6 +113,25 @@ func AsTransient() ConstructorOption {
 func AsScoped() ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
 		c.lifecycle = "scoped"
+	})
+}
+
+// WithEager causes the constructor to be invoked immediately after registration,
+// rather than waiting for first use (lazy). This is useful for:
+//   - Fail-fast behavior: catch construction errors at startup
+//   - Services that need to initialize during app startup (servers, connections)
+//   - Pre-warming caches
+//
+// Example:
+//
+//	// Start database connection immediately, fail if can't connect
+//	ProvideConstructor(c, NewDatabase, WithEager())
+//
+//	// Lazy (default): Wait until first use
+//	ProvideConstructor(c, NewCache)
+func WithEager() ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.eager = true
 	})
 }
 
@@ -249,6 +273,15 @@ func ProvideConstructor(c Vessel, constructor any, opts ...ConstructorOption) er
 					return fmt.Errorf("failed to register alias %q for type %s: %w", alias, asType, err)
 				}
 				_ = i // Unused but kept for clarity
+			}
+		}
+
+		// Eager instantiation: trigger construction immediately
+		if config.eager {
+			// Resolve the primary key to trigger instantiation
+			_, err := impl.typeRegistry.resolve(key, c)
+			if err != nil {
+				return fmt.Errorf("eager instantiation failed for %s: %w", key, err)
 			}
 		}
 	}

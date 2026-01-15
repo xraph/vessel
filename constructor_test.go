@@ -665,3 +665,204 @@ func TestWithAliases_ConflictDetection(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "alias")
 }
+
+func TestWithAliases_TypePrimaryWithNamedAliases(t *testing.T) {
+	c := New()
+
+	// Register by type (unnamed) with named aliases - this is the main use case
+	err := ProvideConstructor(c, newTestDatabase, WithAliases("manager", "db-manager", "primary"))
+	require.NoError(t, err)
+
+	// Should be resolvable by type (unnamed)
+	db1, err := InjectType[*testDatabase](c)
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db1.connStr)
+
+	// Should be resolvable by first alias
+	db2, err := InjectNamed[*testDatabase](c, "manager")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db2.connStr)
+
+	// Should be resolvable by second alias
+	db3, err := InjectNamed[*testDatabase](c, "db-manager")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db3.connStr)
+
+	// Should be resolvable by third alias
+	db4, err := InjectNamed[*testDatabase](c, "primary")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db4.connStr)
+
+	// All should be the same singleton instance
+	assert.Same(t, db1, db2)
+	assert.Same(t, db2, db3)
+	assert.Same(t, db3, db4)
+}
+
+func TestWithAliases_InterfacesWithTypeAndNamedAccess(t *testing.T) {
+	c := New()
+
+	// Register concrete type with interface, accessible by type and named aliases
+	err := ProvideConstructor(c, func() *testReadWriter {
+		return &testReadWriter{}
+	}, As(new(testReader), new(testWriter)), WithAliases("rw", "reader-writer"))
+	require.NoError(t, err)
+
+	// Resolve concrete type unnamed
+	rw1, err := InjectType[*testReadWriter](c)
+	require.NoError(t, err)
+
+	// Resolve concrete type by alias
+	rw2, err := InjectNamed[*testReadWriter](c, "rw")
+	require.NoError(t, err)
+
+	// Resolve interface type unnamed
+	reader1, err := InjectType[testReader](c)
+	require.NoError(t, err)
+
+	// Resolve interface type by alias
+	reader2, err := InjectNamed[testReader](c, "reader-writer")
+	require.NoError(t, err)
+
+	// All should be the same instance
+	assert.Same(t, rw1, rw2)
+	assert.Same(t, rw1, reader1)
+	assert.Same(t, reader1, reader2)
+}
+
+// === WithEager Tests ===
+
+func TestWithEager_InstantiatesImmediately(t *testing.T) {
+	c := New()
+
+	var constructorCalled bool
+
+	// Register with eager instantiation
+	err := ProvideConstructor(c, func() *testDatabase {
+		constructorCalled = true
+		return &testDatabase{connStr: "postgres://localhost/test"}
+	}, WithEager())
+	require.NoError(t, err)
+
+	// Constructor should have been called during registration
+	assert.True(t, constructorCalled, "Constructor should be called immediately with WithEager()")
+
+	// Subsequent calls should return cached instance without calling constructor again
+	constructorCalled = false
+	db, err := InjectType[*testDatabase](c)
+	require.NoError(t, err)
+	assert.False(t, constructorCalled, "Constructor should not be called again")
+	assert.Equal(t, "postgres://localhost/test", db.connStr)
+}
+
+func TestWithEager_FailsImmediately(t *testing.T) {
+	c := New()
+
+	// Register constructor that fails, with eager instantiation
+	err := ProvideConstructor(c, func() (*testDatabase, error) {
+		return nil, errors.New("connection failed")
+	}, WithEager())
+
+	// Should fail immediately during registration
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "eager instantiation failed")
+	assert.Contains(t, err.Error(), "connection failed")
+}
+
+func TestWithEager_WithDependencies(t *testing.T) {
+	c := New()
+
+	var dbConstructorCalled bool
+	var serviceConstructorCalled bool
+
+	// Register dependency first
+	err := ProvideConstructor(c, func() *testDatabase {
+		dbConstructorCalled = true
+		return &testDatabase{connStr: "postgres://localhost/test"}
+	})
+	require.NoError(t, err)
+	assert.False(t, dbConstructorCalled, "DB constructor should not be called yet (lazy)")
+
+	// Register service with eager instantiation
+	err = ProvideConstructor(c, func(db *testDatabase) *testUserService {
+		serviceConstructorCalled = true
+		return &testUserService{db: db}
+	}, WithEager())
+	require.NoError(t, err)
+
+	// Both constructors should have been called
+	assert.True(t, dbConstructorCalled, "DB constructor should be called (dependency)")
+	assert.True(t, serviceConstructorCalled, "Service constructor should be called (eager)")
+
+	// Subsequent resolution should use cached instances
+	dbConstructorCalled = false
+	serviceConstructorCalled = false
+
+	svc, err := InjectType[*testUserService](c)
+	require.NoError(t, err)
+	assert.False(t, serviceConstructorCalled, "Service constructor should not be called again")
+	assert.NotNil(t, svc.db)
+
+	db, err := InjectType[*testDatabase](c)
+	require.NoError(t, err)
+	assert.False(t, dbConstructorCalled, "DB constructor should not be called again")
+	assert.Same(t, svc.db, db, "Should be same cached instance")
+}
+
+func TestWithEager_WithAliases(t *testing.T) {
+	c := New()
+
+	var constructorCalled bool
+
+	// Register with both eager and aliases
+	err := ProvideConstructor(c, func() *testDatabase {
+		constructorCalled = true
+		return &testDatabase{connStr: "postgres://localhost/test"}
+	}, WithEager(), WithAliases("db", "database"))
+	require.NoError(t, err)
+
+	// Constructor should have been called immediately
+	assert.True(t, constructorCalled, "Constructor should be called immediately")
+
+	// Reset flag
+	constructorCalled = false
+
+	// All access methods should return cached instance
+	db1, err := InjectType[*testDatabase](c)
+	require.NoError(t, err)
+	assert.False(t, constructorCalled, "Constructor should not be called again")
+
+	db2, err := InjectNamed[*testDatabase](c, "db")
+	require.NoError(t, err)
+	assert.False(t, constructorCalled, "Constructor should not be called again")
+
+	db3, err := InjectNamed[*testDatabase](c, "database")
+	require.NoError(t, err)
+	assert.False(t, constructorCalled, "Constructor should not be called again")
+
+	// All should be same instance
+	assert.Same(t, db1, db2)
+	assert.Same(t, db2, db3)
+}
+
+func TestWithoutEager_LazyByDefault(t *testing.T) {
+	c := New()
+
+	var constructorCalled bool
+
+	// Register WITHOUT eager (default lazy behavior)
+	err := ProvideConstructor(c, func() *testDatabase {
+		constructorCalled = true
+		return &testDatabase{connStr: "postgres://localhost/test"}
+	})
+	require.NoError(t, err)
+
+	// Constructor should NOT have been called during registration
+	assert.False(t, constructorCalled, "Constructor should not be called (lazy by default)")
+
+	// Constructor should be called on first resolution
+	db, err := InjectType[*testDatabase](c)
+	require.NoError(t, err)
+	assert.True(t, constructorCalled, "Constructor should be called on first use")
+	assert.Equal(t, "postgres://localhost/test", db.connStr)
+}

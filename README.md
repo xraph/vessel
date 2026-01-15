@@ -235,7 +235,7 @@ userService, err := vessel.InjectType[*UserService](c)
 ### Constructor Options
 
 ```go
-// Named services
+// Named services - explicit primary name
 vessel.ProvideConstructor(c, NewPrimaryDB, vessel.WithName("primary"))
 vessel.ProvideConstructor(c, NewSecondaryDB, vessel.WithName("secondary"))
 
@@ -243,15 +243,22 @@ vessel.ProvideConstructor(c, NewSecondaryDB, vessel.WithName("secondary"))
 primary, _ := vessel.InjectNamed[*Database](c, "primary")
 secondary, _ := vessel.InjectNamed[*Database](c, "secondary")
 
-// Service aliases - register under multiple names
+// Service aliases - register by TYPE with named aliases (recommended pattern)
+// Primary access is by type, aliases provide named variants
 vessel.ProvideConstructor(c, NewDatabaseManager, 
-    vessel.WithName("manager"), 
-    vessel.WithAliases("db-manager", ""))  // "" = also accessible without name
+    vessel.WithAliases("manager", "db-manager"))
 
-// All resolve to the same instance
-mgr1, _ := vessel.InjectNamed[*DatabaseManager](c, "manager")
-mgr2, _ := vessel.InjectNamed[*DatabaseManager](c, "db-manager")
-mgr3, _ := vessel.InjectType[*DatabaseManager](c)  // mgr1 == mgr2 == mgr3
+// Can resolve by type (unnamed):
+mgr1, _ := vessel.InjectType[*DatabaseManager](c)
+// Or by any alias:
+mgr2, _ := vessel.InjectNamed[*DatabaseManager](c, "manager")
+mgr3, _ := vessel.InjectNamed[*DatabaseManager](c, "db-manager")
+// mgr1 == mgr2 == mgr3 (same singleton instance)
+
+// Alternative: Named primary with unnamed alias
+vessel.ProvideConstructor(c, NewCache, 
+    vessel.WithName("cache"),
+    vessel.WithAliases(""))  // "" = also accessible without name
 
 // Check existence
 if vessel.HasType[*Database](c) { /* ... */ }
@@ -261,6 +268,63 @@ if vessel.HasTypeNamed[*Database](c, "primary") { /* ... */ }
 vessel.ProvideConstructor(c, NewDB, vessel.AsSingleton())  // default
 vessel.ProvideConstructor(c, NewReq, vessel.AsTransient())
 vessel.ProvideConstructor(c, NewSession, vessel.AsScoped())
+
+// Eager vs Lazy instantiation
+vessel.ProvideConstructor(c, NewCache)                     // lazy (default): created on first use
+vessel.ProvideConstructor(c, NewDatabase, vessel.WithEager())  // eager: created immediately, fails fast
+```
+
+### Eager vs Lazy Instantiation
+
+By default, services are **lazy** - they're created only when first requested. Use `WithEager()` for immediate instantiation:
+
+```go
+// LAZY (default): Constructor called on first InjectType/InjectNamed
+vessel.ProvideConstructor(c, NewCache)
+// At this point, NewCache has NOT been called yet
+db, _ := vessel.InjectType[*Cache](c)  // ← NewCache called here
+
+// EAGER: Constructor called immediately during ProvideConstructor
+vessel.ProvideConstructor(c, NewDatabase, vessel.WithEager())
+// At this point, NewDatabase HAS been called and instance is cached
+// If constructor fails, ProvideConstructor returns error immediately
+```
+
+**When to use `WithEager()`:**
+- **Fail-fast**: Catch construction errors at startup, not during request handling
+- **Pre-initialize**: Open database connections, warm caches before serving requests
+- **Start services**: HTTP servers, background workers that should start immediately
+- **Validate config**: Ensure all required configuration is valid at startup
+
+**When to use lazy (default):**
+- **Fast startup**: Only create services that are actually used
+- **Optional features**: Services that may not be needed in all code paths
+- **Memory efficiency**: Don't create expensive services that won't be used
+- **Testing**: Create only services needed for specific test cases
+
+**Example: Database with eager initialization**
+
+```go
+// Register database with eager instantiation for fail-fast behavior
+err := vessel.ProvideConstructor(c, func(config *Config) (*Database, error) {
+    db, err := sql.Open(config.Driver, config.DSN)
+    if err != nil {
+        return nil, fmt.Errorf("failed to open database: %w", err)
+    }
+    // Test connection immediately
+    if err := db.Ping(); err != nil {
+        return nil, fmt.Errorf("failed to ping database: %w", err)
+    }
+    return db, nil
+}, vessel.WithEager())
+
+if err != nil {
+    // Connection error caught at startup, before serving requests
+    log.Fatal("Failed to initialize database:", err)
+}
+
+// Database is already connected and ready to use
+// All subsequent InjectType calls return the cached, connected instance
 ```
 
 ### Value Groups
