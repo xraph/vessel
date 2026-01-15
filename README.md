@@ -243,6 +243,16 @@ vessel.ProvideConstructor(c, NewSecondaryDB, vessel.WithName("secondary"))
 primary, _ := vessel.InjectNamed[*Database](c, "primary")
 secondary, _ := vessel.InjectNamed[*Database](c, "secondary")
 
+// Service aliases - register under multiple names
+vessel.ProvideConstructor(c, NewDatabaseManager, 
+    vessel.WithName("manager"), 
+    vessel.WithAliases("db-manager", ""))  // "" = also accessible without name
+
+// All resolve to the same instance
+mgr1, _ := vessel.InjectNamed[*DatabaseManager](c, "manager")
+mgr2, _ := vessel.InjectNamed[*DatabaseManager](c, "db-manager")
+mgr3, _ := vessel.InjectType[*DatabaseManager](c)  // mgr1 == mgr2 == mgr3
+
 // Check existence
 if vessel.HasType[*Database](c) { /* ... */ }
 if vessel.HasTypeNamed[*Database](c, "primary") { /* ... */ }

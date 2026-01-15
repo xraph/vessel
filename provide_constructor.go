@@ -13,6 +13,7 @@ type ConstructorOption interface {
 // constructorConfig holds configuration for constructor registration
 type constructorConfig struct {
 	name      string         // Optional name for disambiguation
+	aliases   []string       // Additional names to register under
 	group     string         // Add to a value group
 	asTypes   []reflect.Type // Register as additional interface types
 	lifecycle string         // Service lifecycle (default: "singleton")
@@ -33,6 +34,27 @@ func (f constructorOptionFunc) applyConstructor(c *constructorConfig) { f(c) }
 func WithName(name string) ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
 		c.name = name
+	})
+}
+
+// WithAliases registers the constructor result under additional names.
+// This allows retrieving the same service instance using different names.
+// Use empty string ("") as an alias to also register without a name.
+//
+// Example:
+//
+//	// Register with primary name "manager" and also accessible without name
+//	ProvideConstructor(c, NewDatabaseManager, WithName("manager"), WithAliases(""))
+//
+//	// Can now resolve both ways:
+//	manager1, _ := InjectNamed[*DatabaseManager](c, "manager")
+//	manager2, _ := InjectType[*DatabaseManager](c)  // Same instance
+//
+//	// Multiple aliases
+//	ProvideConstructor(c, NewCache, WithName("primary"), WithAliases("default", "main"))
+func WithAliases(names ...string) ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.aliases = append(c.aliases, names...)
 	})
 }
 
@@ -201,6 +223,32 @@ func ProvideConstructor(c Vessel, constructor any, opts ...ConstructorOption) er
 			}
 			if err := impl.typeRegistry.register(asKey, asReg); err != nil {
 				return err
+			}
+		}
+
+		// Register under additional aliases
+		// NOTE: Aliases point to the SAME registration object to share singleton instances
+		for _, alias := range config.aliases {
+			aliasKey := typeKey{typ: result.typ, name: alias}
+			if err := impl.typeRegistry.register(aliasKey, reg); err != nil {
+				return fmt.Errorf("failed to register alias %q: %w", alias, err)
+			}
+
+			// Also register aliases for additional interface types
+			// These share the same registration as the corresponding asType registration
+			for i, asType := range config.asTypes {
+				aliasAsKey := typeKey{typ: asType, name: alias}
+				// Find the corresponding asType registration to share
+				asKey := typeKey{typ: asType, name: name}
+				asReg, ok := impl.typeRegistry.get(asKey)
+				if !ok {
+					// This shouldn't happen since we just registered it above
+					return fmt.Errorf("failed to find registration for type %s", asType)
+				}
+				if err := impl.typeRegistry.register(aliasAsKey, asReg); err != nil {
+					return fmt.Errorf("failed to register alias %q for type %s: %w", alias, asType, err)
+				}
+				_ = i // Unused but kept for clarity
 			}
 		}
 	}

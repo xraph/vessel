@@ -534,6 +534,10 @@ type testReader interface {
 	Read() string
 }
 
+type testWriter interface {
+	Write(s string)
+}
+
 type testReadWriter struct{}
 
 func (rw *testReadWriter) Read() string   { return "data" }
@@ -551,4 +555,113 @@ func TestProvideConstructor_As(t *testing.T) {
 	reader, err := InjectType[testReader](c)
 	require.NoError(t, err)
 	assert.Equal(t, "data", reader.Read())
+}
+
+func TestWithAliases_MultipleNames(t *testing.T) {
+	c := New()
+
+	// Register with primary name and aliases
+	err := ProvideConstructor(c, newTestDatabase, WithName("primary"), WithAliases("default", "main"))
+	require.NoError(t, err)
+
+	// Should be resolvable by primary name
+	db1, err := InjectNamed[*testDatabase](c, "primary")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db1.connStr)
+
+	// Should be resolvable by first alias
+	db2, err := InjectNamed[*testDatabase](c, "default")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db2.connStr)
+
+	// Should be resolvable by second alias
+	db3, err := InjectNamed[*testDatabase](c, "main")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db3.connStr)
+
+	// All should be the same instance (singleton)
+	assert.Same(t, db1, db2)
+	assert.Same(t, db2, db3)
+}
+
+func TestWithAliases_EmptyStringForUnnamed(t *testing.T) {
+	c := New()
+
+	// Register with a name but also as unnamed (empty string alias)
+	err := ProvideConstructor(c, newTestDatabase, WithName("named"), WithAliases(""))
+	require.NoError(t, err)
+
+	// Should be resolvable by name
+	db1, err := InjectNamed[*testDatabase](c, "named")
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db1.connStr)
+
+	// Should also be resolvable without name
+	db2, err := InjectType[*testDatabase](c)
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", db2.connStr)
+
+	// Should be the same instance
+	assert.Same(t, db1, db2)
+}
+
+func TestWithAliases_WithAsTypes(t *testing.T) {
+	c := New()
+
+	// Register with name, aliases, and additional interface types
+	err := ProvideConstructor(c, func() *testReadWriter {
+		return &testReadWriter{}
+	}, WithName("rw"), WithAliases("default", ""), As(new(testReader), new(testWriter)))
+	require.NoError(t, err)
+
+	// Should be resolvable as concrete type by name
+	rw1, err := InjectNamed[*testReadWriter](c, "rw")
+	require.NoError(t, err)
+
+	// Should be resolvable as concrete type by alias
+	rw2, err := InjectNamed[*testReadWriter](c, "default")
+	require.NoError(t, err)
+
+	// Should be resolvable as concrete type without name
+	rw3, err := InjectType[*testReadWriter](c)
+	require.NoError(t, err)
+
+	// Should be resolvable as interface by name
+	reader1, err := InjectNamed[testReader](c, "rw")
+	require.NoError(t, err)
+
+	// Should be resolvable as interface by alias
+	reader2, err := InjectNamed[testReader](c, "default")
+	require.NoError(t, err)
+
+	// Should be resolvable as interface without name
+	reader3, err := InjectType[testReader](c)
+	require.NoError(t, err)
+
+	// All should be the same instance
+	assert.Same(t, rw1, rw2)
+	assert.Same(t, rw2, rw3)
+	assert.Same(t, rw1, reader1)
+	assert.Same(t, reader1, reader2)
+	assert.Same(t, reader2, reader3)
+}
+
+func TestWithAliases_ConflictDetection(t *testing.T) {
+	c := New()
+
+	// Register first database
+	err := ProvideConstructor(c, newTestDatabase, WithName("primary"))
+	require.NoError(t, err)
+
+	// Try to register second database with same name - should fail
+	err = ProvideConstructor(c, newTestDatabase, WithName("primary"))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
+
+	// Try to register with alias that conflicts with existing named service
+	err = ProvideConstructor(c, func() *testDatabase {
+		return &testDatabase{connStr: "different"}
+	}, WithName("secondary"), WithAliases("primary"))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "alias")
 }
