@@ -14,10 +14,10 @@ type testService struct {
 	value string
 }
 
-func (s *testService) Name() string                        { return "test" }
-func (s *testService) Start(_ context.Context) error       { return nil }
-func (s *testService) Stop(_ context.Context) error        { return nil }
-func (s *testService) Health(_ context.Context) error      { return nil }
+func (s *testService) Name() string                   { return "test" }
+func (s *testService) Start(_ context.Context) error  { return nil }
+func (s *testService) Stop(_ context.Context) error   { return nil }
+func (s *testService) Health(_ context.Context) error { return nil }
 
 func TestMiddleware_BeforeAfterResolve(t *testing.T) {
 	c := New().(*containerImpl)
