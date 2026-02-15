@@ -61,10 +61,10 @@ func newTestUserServiceWithError(db *testDatabase) (*testUserService, error) {
 func TestProvideConstructor_Simple(t *testing.T) {
 	c := New()
 
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
-	db, err := InjectType[*testDatabase](c)
+	db, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://localhost/test", db.connStr)
 }
@@ -73,18 +73,18 @@ func TestProvideConstructor_WithDependencies(t *testing.T) {
 	c := New()
 
 	// Register dependencies first
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, newTestLogger)
+	err = Provide(c, newTestLogger)
 	require.NoError(t, err)
 
 	// Register service that depends on them
-	err = ProvideConstructor(c, newTestUserService)
+	err = Provide(c, newTestUserService)
 	require.NoError(t, err)
 
 	// Resolve
-	svc, err := InjectType[*testUserService](c)
+	svc, err := Inject[*testUserService](c)
 	require.NoError(t, err)
 	assert.NotNil(t, svc.db)
 	assert.NotNil(t, svc.logger)
@@ -96,15 +96,15 @@ func TestProvideConstructor_WithError(t *testing.T) {
 	c := New()
 
 	// Provide database
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
 	// Provide service that can error
-	err = ProvideConstructor(c, newTestUserServiceWithError)
+	err = Provide(c, newTestUserServiceWithError)
 	require.NoError(t, err)
 
 	// Resolve
-	svc, err := InjectType[*testUserService](c)
+	svc, err := Inject[*testUserService](c)
 	require.NoError(t, err)
 	assert.NotNil(t, svc.db)
 }
@@ -113,13 +113,13 @@ func TestProvideConstructor_ErrorReturned(t *testing.T) {
 	c := New()
 
 	// Constructor that always errors
-	err := ProvideConstructor(c, func() (*testDatabase, error) {
+	err := Provide(c, func() (*testDatabase, error) {
 		return nil, errors.New("connection failed")
 	})
 	require.NoError(t, err)
 
 	// Resolution should fail
-	_, err = InjectType[*testDatabase](c)
+	_, err = Inject[*testDatabase](c)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "connection failed")
 }
@@ -128,11 +128,11 @@ func TestProvideConstructor_MissingDependency(t *testing.T) {
 	c := New()
 
 	// Register service without its dependencies
-	err := ProvideConstructor(c, newTestUserService)
+	err := Provide(c, newTestUserService)
 	require.NoError(t, err)
 
 	// Resolution should fail
-	_, err = InjectType[*testUserService](c)
+	_, err = Inject[*testUserService](c)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no provider")
 }
@@ -141,17 +141,17 @@ func TestProvideConstructor_Singleton(t *testing.T) {
 	c := New()
 	callCount := 0
 
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		callCount++
 		return &testDatabase{connStr: "test"}
 	})
 	require.NoError(t, err)
 
 	// Resolve multiple times
-	db1, err := InjectType[*testDatabase](c)
+	db1, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 
-	db2, err := InjectType[*testDatabase](c)
+	db2, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 
 	// Should be same instance
@@ -163,17 +163,17 @@ func TestProvideConstructor_Transient(t *testing.T) {
 	c := New()
 	callCount := 0
 
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		callCount++
 		return &testDatabase{connStr: "test"}
 	}, AsTransient())
 	require.NoError(t, err)
 
 	// Resolve multiple times
-	db1, err := InjectType[*testDatabase](c)
+	db1, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 
-	db2, err := InjectType[*testDatabase](c)
+	db2, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 
 	// Should be different instances
@@ -187,13 +187,13 @@ func TestProvideConstructor_Named(t *testing.T) {
 	c := New()
 
 	// Primary database
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		return &testDatabase{connStr: "primary"}
 	}, WithName("primary"))
 	require.NoError(t, err)
 
 	// Replica database
-	err = ProvideConstructor(c, func() *testDatabase {
+	err = Provide(c, func() *testDatabase {
 		return &testDatabase{connStr: "replica"}
 	}, WithName("replica"))
 	require.NoError(t, err)
@@ -211,11 +211,11 @@ func TestProvideConstructor_Named(t *testing.T) {
 func TestProvideConstructor_DuplicateType(t *testing.T) {
 	c := New()
 
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
 	// Should error on duplicate
-	err = ProvideConstructor(c, newTestDatabase)
+	err = Provide(c, newTestDatabase)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already registered")
 }
@@ -237,18 +237,18 @@ func TestProvideConstructor_InStruct(t *testing.T) {
 	c := New()
 
 	// Register dependencies
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, newTestLogger)
+	err = Provide(c, newTestLogger)
 	require.NoError(t, err)
 
 	// Register service with In struct
-	err = ProvideConstructor(c, newServiceWithIn)
+	err = Provide(c, newServiceWithIn)
 	require.NoError(t, err)
 
 	// Resolve
-	svc, err := InjectType[*testUserService](c)
+	svc, err := Inject[*testUserService](c)
 	require.NoError(t, err)
 	assert.NotNil(t, svc.db)
 	assert.NotNil(t, svc.logger)
@@ -269,15 +269,15 @@ func TestProvideConstructor_InStruct_Optional(t *testing.T) {
 	c := New()
 
 	// Only register database, not cache
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
 	// Register service with optional dependency
-	err = ProvideConstructor(c, newServiceWithOptional)
+	err = Provide(c, newServiceWithOptional)
 	require.NoError(t, err)
 
 	// Resolve - should succeed even without cache
-	svc, err := InjectType[*testUserService](c)
+	svc, err := Inject[*testUserService](c)
 	require.NoError(t, err)
 	assert.NotNil(t, svc.db)
 }
@@ -302,22 +302,22 @@ func TestProvideConstructor_InStruct_Named(t *testing.T) {
 	c := New()
 
 	// Register named databases
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		return &testDatabase{connStr: "primary"}
 	}, WithName("primary"))
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, func() *testDatabase {
+	err = Provide(c, func() *testDatabase {
 		return &testDatabase{connStr: "replica"}
 	}, WithName("replica"))
 	require.NoError(t, err)
 
 	// Register service that depends on named services
-	err = ProvideConstructor(c, newMultiDBService)
+	err = Provide(c, newMultiDBService)
 	require.NoError(t, err)
 
 	// Resolve
-	svc, err := InjectType[*testMultiDBService](c)
+	svc, err := Inject[*testMultiDBService](c)
 	require.NoError(t, err)
 	assert.Equal(t, "primary", svc.primary.connStr)
 	assert.Equal(t, "replica", svc.replica.connStr)
@@ -343,25 +343,25 @@ func TestProvideConstructor_OutStruct(t *testing.T) {
 	c := New()
 
 	// Register dependencies
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, newTestLogger)
+	err = Provide(c, newTestLogger)
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, newTestCache)
+	err = Provide(c, newTestCache)
 	require.NoError(t, err)
 
 	// Register constructor that returns Out struct
-	err = ProvideConstructor(c, newTestServices)
+	err = Provide(c, newTestServices)
 	require.NoError(t, err)
 
 	// Resolve both services
-	userSvc, err := InjectType[*testUserService](c)
+	userSvc, err := Inject[*testUserService](c)
 	require.NoError(t, err)
 	assert.NotNil(t, userSvc.db)
 
-	productSvc, err := InjectType[*testProductService](c)
+	productSvc, err := Inject[*testProductService](c)
 	require.NoError(t, err)
 	assert.NotNil(t, productSvc.db)
 }
@@ -380,12 +380,12 @@ func TestProvideConstructor_Group(t *testing.T) {
 	c := New()
 
 	// Register handlers in a group
-	err := ProvideConstructor(c, func() *testUserHandler {
+	err := Provide(c, func() *testUserHandler {
 		return &testUserHandler{}
 	}, AsGroup("handlers"))
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, func() *testProductHandler {
+	err = Provide(c, func() *testProductHandler {
 		return &testProductHandler{}
 	}, AsGroup("handlers"))
 	require.NoError(t, err)
@@ -405,7 +405,7 @@ func TestHasType(t *testing.T) {
 
 	assert.False(t, HasType[*testDatabase](c))
 
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
 	assert.True(t, HasType[*testDatabase](c))
@@ -416,7 +416,7 @@ func TestHasTypeNamed(t *testing.T) {
 
 	assert.False(t, HasTypeNamed[*testDatabase](c, "primary"))
 
-	err := ProvideConstructor(c, newTestDatabase, WithName("primary"))
+	err := Provide(c, newTestDatabase, WithName("primary"))
 	require.NoError(t, err)
 
 	assert.True(t, HasTypeNamed[*testDatabase](c, "primary"))
@@ -428,10 +428,10 @@ func TestHasTypeNamed(t *testing.T) {
 func TestMustInjectType_Success(t *testing.T) {
 	c := New()
 
-	err := ProvideConstructor(c, newTestDatabase)
+	err := Provide(c, newTestDatabase)
 	require.NoError(t, err)
 
-	db := MustInjectType[*testDatabase](c)
+	db := MustInject[*testDatabase](c)
 	assert.NotNil(t, db)
 }
 
@@ -439,14 +439,14 @@ func TestMustInjectType_Panic(t *testing.T) {
 	c := New()
 
 	assert.Panics(t, func() {
-		MustInjectType[*testDatabase](c)
+		MustInject[*testDatabase](c)
 	})
 }
 
 func TestMustInjectNamed_Success(t *testing.T) {
 	c := New()
 
-	err := ProvideConstructor(c, newTestDatabase, WithName("primary"))
+	err := Provide(c, newTestDatabase, WithName("primary"))
 	require.NoError(t, err)
 
 	db := MustInjectNamed[*testDatabase](c, "primary")
@@ -475,18 +475,18 @@ func TestProvideConstructor_CircularDependency(t *testing.T) {
 	c := New()
 
 	// This creates a circular dependency: A -> B -> A
-	err := ProvideConstructor(c, func(b *testCircularB) *testCircularA {
+	err := Provide(c, func(b *testCircularB) *testCircularA {
 		return &testCircularA{B: b}
 	})
 	require.NoError(t, err)
 
-	err = ProvideConstructor(c, func(a *testCircularA) *testCircularB {
+	err = Provide(c, func(a *testCircularA) *testCircularB {
 		return &testCircularB{A: a}
 	})
 	require.NoError(t, err)
 
 	// Resolution should detect cycle
-	_, err = InjectType[*testCircularA](c)
+	_, err = Inject[*testCircularA](c)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "circular")
 }
@@ -546,13 +546,13 @@ func (rw *testReadWriter) Write(s string) {}
 func TestProvideConstructor_As(t *testing.T) {
 	c := New()
 
-	err := ProvideConstructor(c, func() *testReadWriter {
+	err := Provide(c, func() *testReadWriter {
 		return &testReadWriter{}
 	}, As(new(testReader)))
 	require.NoError(t, err)
 
 	// Should be resolvable as interface
-	reader, err := InjectType[testReader](c)
+	reader, err := Inject[testReader](c)
 	require.NoError(t, err)
 	assert.Equal(t, "data", reader.Read())
 }
@@ -561,7 +561,7 @@ func TestWithAliases_MultipleNames(t *testing.T) {
 	c := New()
 
 	// Register with primary name and aliases
-	err := ProvideConstructor(c, newTestDatabase, WithName("primary"), WithAliases("default", "main"))
+	err := Provide(c, newTestDatabase, WithName("primary"), WithAliases("default", "main"))
 	require.NoError(t, err)
 
 	// Should be resolvable by primary name
@@ -588,7 +588,7 @@ func TestWithAliases_EmptyStringForUnnamed(t *testing.T) {
 	c := New()
 
 	// Register with a name but also as unnamed (empty string alias)
-	err := ProvideConstructor(c, newTestDatabase, WithName("named"), WithAliases(""))
+	err := Provide(c, newTestDatabase, WithName("named"), WithAliases(""))
 	require.NoError(t, err)
 
 	// Should be resolvable by name
@@ -597,7 +597,7 @@ func TestWithAliases_EmptyStringForUnnamed(t *testing.T) {
 	assert.Equal(t, "postgres://localhost/test", db1.connStr)
 
 	// Should also be resolvable without name
-	db2, err := InjectType[*testDatabase](c)
+	db2, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://localhost/test", db2.connStr)
 
@@ -609,7 +609,7 @@ func TestWithAliases_WithAsTypes(t *testing.T) {
 	c := New()
 
 	// Register with name, aliases, and additional interface types
-	err := ProvideConstructor(c, func() *testReadWriter {
+	err := Provide(c, func() *testReadWriter {
 		return &testReadWriter{}
 	}, WithName("rw"), WithAliases("default", ""), As(new(testReader), new(testWriter)))
 	require.NoError(t, err)
@@ -623,7 +623,7 @@ func TestWithAliases_WithAsTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be resolvable as concrete type without name
-	rw3, err := InjectType[*testReadWriter](c)
+	rw3, err := Inject[*testReadWriter](c)
 	require.NoError(t, err)
 
 	// Should be resolvable as interface by name
@@ -635,7 +635,7 @@ func TestWithAliases_WithAsTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be resolvable as interface without name
-	reader3, err := InjectType[testReader](c)
+	reader3, err := Inject[testReader](c)
 	require.NoError(t, err)
 
 	// All should be the same instance
@@ -650,16 +650,16 @@ func TestWithAliases_ConflictDetection(t *testing.T) {
 	c := New()
 
 	// Register first database
-	err := ProvideConstructor(c, newTestDatabase, WithName("primary"))
+	err := Provide(c, newTestDatabase, WithName("primary"))
 	require.NoError(t, err)
 
 	// Try to register second database with same name - should fail
-	err = ProvideConstructor(c, newTestDatabase, WithName("primary"))
+	err = Provide(c, newTestDatabase, WithName("primary"))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already registered")
 
 	// Try to register with alias that conflicts with existing named service
-	err = ProvideConstructor(c, func() *testDatabase {
+	err = Provide(c, func() *testDatabase {
 		return &testDatabase{connStr: "different"}
 	}, WithName("secondary"), WithAliases("primary"))
 	assert.Error(t, err)
@@ -670,11 +670,11 @@ func TestWithAliases_TypePrimaryWithNamedAliases(t *testing.T) {
 	c := New()
 
 	// Register by type (unnamed) with named aliases - this is the main use case
-	err := ProvideConstructor(c, newTestDatabase, WithAliases("manager", "db-manager", "primary"))
+	err := Provide(c, newTestDatabase, WithAliases("manager", "db-manager", "primary"))
 	require.NoError(t, err)
 
 	// Should be resolvable by type (unnamed)
-	db1, err := InjectType[*testDatabase](c)
+	db1, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://localhost/test", db1.connStr)
 
@@ -703,13 +703,13 @@ func TestWithAliases_InterfacesWithTypeAndNamedAccess(t *testing.T) {
 	c := New()
 
 	// Register concrete type with interface, accessible by type and named aliases
-	err := ProvideConstructor(c, func() *testReadWriter {
+	err := Provide(c, func() *testReadWriter {
 		return &testReadWriter{}
 	}, As(new(testReader), new(testWriter)), WithAliases("rw", "reader-writer"))
 	require.NoError(t, err)
 
 	// Resolve concrete type unnamed
-	rw1, err := InjectType[*testReadWriter](c)
+	rw1, err := Inject[*testReadWriter](c)
 	require.NoError(t, err)
 
 	// Resolve concrete type by alias
@@ -717,7 +717,7 @@ func TestWithAliases_InterfacesWithTypeAndNamedAccess(t *testing.T) {
 	require.NoError(t, err)
 
 	// Resolve interface type unnamed
-	reader1, err := InjectType[testReader](c)
+	reader1, err := Inject[testReader](c)
 	require.NoError(t, err)
 
 	// Resolve interface type by alias
@@ -738,7 +738,7 @@ func TestWithEager_InstantiatesImmediately(t *testing.T) {
 	var constructorCalled bool
 
 	// Register with eager instantiation
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		constructorCalled = true
 		return &testDatabase{connStr: "postgres://localhost/test"}
 	}, WithEager())
@@ -749,7 +749,7 @@ func TestWithEager_InstantiatesImmediately(t *testing.T) {
 
 	// Subsequent calls should return cached instance without calling constructor again
 	constructorCalled = false
-	db, err := InjectType[*testDatabase](c)
+	db, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.False(t, constructorCalled, "Constructor should not be called again")
 	assert.Equal(t, "postgres://localhost/test", db.connStr)
@@ -759,7 +759,7 @@ func TestWithEager_FailsImmediately(t *testing.T) {
 	c := New()
 
 	// Register constructor that fails, with eager instantiation
-	err := ProvideConstructor(c, func() (*testDatabase, error) {
+	err := Provide(c, func() (*testDatabase, error) {
 		return nil, errors.New("connection failed")
 	}, WithEager())
 
@@ -776,7 +776,7 @@ func TestWithEager_WithDependencies(t *testing.T) {
 	var serviceConstructorCalled bool
 
 	// Register dependency first
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		dbConstructorCalled = true
 		return &testDatabase{connStr: "postgres://localhost/test"}
 	})
@@ -784,7 +784,7 @@ func TestWithEager_WithDependencies(t *testing.T) {
 	assert.False(t, dbConstructorCalled, "DB constructor should not be called yet (lazy)")
 
 	// Register service with eager instantiation
-	err = ProvideConstructor(c, func(db *testDatabase) *testUserService {
+	err = Provide(c, func(db *testDatabase) *testUserService {
 		serviceConstructorCalled = true
 		return &testUserService{db: db}
 	}, WithEager())
@@ -798,12 +798,12 @@ func TestWithEager_WithDependencies(t *testing.T) {
 	dbConstructorCalled = false
 	serviceConstructorCalled = false
 
-	svc, err := InjectType[*testUserService](c)
+	svc, err := Inject[*testUserService](c)
 	require.NoError(t, err)
 	assert.False(t, serviceConstructorCalled, "Service constructor should not be called again")
 	assert.NotNil(t, svc.db)
 
-	db, err := InjectType[*testDatabase](c)
+	db, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.False(t, dbConstructorCalled, "DB constructor should not be called again")
 	assert.Same(t, svc.db, db, "Should be same cached instance")
@@ -815,7 +815,7 @@ func TestWithEager_WithAliases(t *testing.T) {
 	var constructorCalled bool
 
 	// Register with both eager and aliases
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		constructorCalled = true
 		return &testDatabase{connStr: "postgres://localhost/test"}
 	}, WithEager(), WithAliases("db", "database"))
@@ -828,7 +828,7 @@ func TestWithEager_WithAliases(t *testing.T) {
 	constructorCalled = false
 
 	// All access methods should return cached instance
-	db1, err := InjectType[*testDatabase](c)
+	db1, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.False(t, constructorCalled, "Constructor should not be called again")
 
@@ -851,7 +851,7 @@ func TestWithoutEager_LazyByDefault(t *testing.T) {
 	var constructorCalled bool
 
 	// Register WITHOUT eager (default lazy behavior)
-	err := ProvideConstructor(c, func() *testDatabase {
+	err := Provide(c, func() *testDatabase {
 		constructorCalled = true
 		return &testDatabase{connStr: "postgres://localhost/test"}
 	})
@@ -861,7 +861,7 @@ func TestWithoutEager_LazyByDefault(t *testing.T) {
 	assert.False(t, constructorCalled, "Constructor should not be called (lazy by default)")
 
 	// Constructor should be called on first resolution
-	db, err := InjectType[*testDatabase](c)
+	db, err := Inject[*testDatabase](c)
 	require.NoError(t, err)
 	assert.True(t, constructorCalled, "Constructor should be called on first use")
 	assert.Equal(t, "postgres://localhost/test", db.connStr)

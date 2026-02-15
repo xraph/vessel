@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xraph/go-utils/di"
 )
 
 // Additional tests to achieve 100% coverage
@@ -18,7 +19,7 @@ func TestResolve_Transient_NonService(t *testing.T) {
 	// Register non-Service type as transient
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return "transient-value", nil
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	// Resolve multiple times
@@ -46,7 +47,7 @@ func TestStart_RollbackOnError(t *testing.T) {
 			name:     "main",
 			startErr: expectedErr,
 		}, nil
-	}, WithDependencies("dep1"))
+	}, di.WithDependencies("dep1"))
 	require.NoError(t, err)
 
 	// Start should fail and rollback
@@ -66,12 +67,12 @@ func TestStart_CircularDependencyError(t *testing.T) {
 	// Register services with circular dependency
 	err := c.Register("a", func(c Vessel) (any, error) {
 		return &mockService{name: "a"}, nil
-	}, WithDependencies("b"))
+	}, di.WithDependencies("b"))
 	require.NoError(t, err)
 
 	err = c.Register("b", func(c Vessel) (any, error) {
 		return &mockService{name: "b"}, nil
-	}, WithDependencies("a"))
+	}, di.WithDependencies("a"))
 	require.NoError(t, err)
 
 	// Start should fail with circular dependency error
@@ -110,12 +111,12 @@ func TestStop_CircularDependencyError(t *testing.T) {
 	// Register services with circular dependency
 	err := c.Register("a", func(c Vessel) (any, error) {
 		return &mockService{name: "a"}, nil
-	}, WithDependencies("b"))
+	}, di.WithDependencies("b"))
 	require.NoError(t, err)
 
 	err = c.Register("b", func(c Vessel) (any, error) {
 		return &mockService{name: "b"}, nil
-	}, WithDependencies("a"))
+	}, di.WithDependencies("a"))
 	require.NoError(t, err)
 
 	// Manually mark as started to test Stop path
@@ -189,7 +190,7 @@ func TestScope_ResolveTransient_NonService(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return "transient-value", nil
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -207,12 +208,12 @@ func TestScope_End_MultipleDisposables(t *testing.T) {
 	// Register multiple scoped services with disposable
 	err := c.Register("test1", func(c Vessel) (any, error) {
 		return &mockService{name: "test1"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	err = c.Register("test2", func(c Vessel) (any, error) {
 		return &mockService{name: "test2"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -253,7 +254,7 @@ func TestHealth_ScopedService(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &mockService{name: "test", healthy: true}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	// Health should skip scoped services (they're not singleton)
@@ -267,7 +268,7 @@ func TestHealth_TransientService(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &mockService{name: "test", healthy: true}, nil
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	// Health should skip transient services (they're not singleton)
@@ -281,7 +282,7 @@ func TestHealth_SingletonNotResolved(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &mockService{name: "test", healthy: true}, nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	// Don't resolve - instance is nil
@@ -297,7 +298,7 @@ func TestResolve_TransientWithError(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return nil, expectedErr
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	// Resolve should return factory error
@@ -317,7 +318,7 @@ func TestStartService_ResolveError(t *testing.T) {
 
 	err = c.Register("main", func(c Vessel) (any, error) {
 		return &mockService{name: "main"}, nil
-	}, WithDependencies("dep"))
+	}, di.WithDependencies("dep"))
 	require.NoError(t, err)
 
 	// Start should fail when dependency resolution fails
@@ -333,7 +334,7 @@ func TestScope_ResolveScopedWithError(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return nil, expectedErr
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -351,7 +352,7 @@ func TestScope_End_NonDisposable(t *testing.T) {
 	// Register non-Disposable type
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return "not-disposable", nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -370,7 +371,7 @@ func TestScope_ResolveSingleton_FromScope(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &mockService{name: "test"}, nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -395,7 +396,7 @@ func TestScope_ResolveScoped_Cached(t *testing.T) {
 		callCount++
 
 		return &mockService{name: "test"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -419,7 +420,7 @@ func TestScope_ResolveTransient_Error(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return nil, expectedErr
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -436,7 +437,7 @@ func TestScope_End_WithDisposableInstance(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &mockService{name: "test"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -468,7 +469,7 @@ func TestResolve_Singleton_DoubleCheckPath(t *testing.T) {
 		mu.Unlock()
 
 		return &mockService{name: "test"}, nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	// First resolve creates instance

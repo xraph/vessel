@@ -1,368 +1,640 @@
 package vessel
 
 import (
-	"context"
 	"fmt"
 	"reflect"
-
-	"github.com/xraph/go-utils/di"
 )
 
-// Provide registers a service with typed dependency injection.
-// It accepts InjectOption arguments followed by a factory function.
+// ConstructorOption configures how a constructor is registered
+type ConstructorOption interface {
+	applyConstructor(*constructorConfig)
+}
+
+// constructorConfig holds configuration for constructor registration
+type constructorConfig struct {
+	name      string         // Optional name for disambiguation
+	aliases   []string       // Additional names to register under
+	group     string         // Add to a value group
+	asTypes   []reflect.Type // Register as additional interface types
+	lifecycle string         // Service lifecycle (default: "singleton")
+	eager     bool           // Instantiate immediately after registration
+}
+
+// constructorOptionFunc is a function adapter for ConstructorOption
+type constructorOptionFunc func(*constructorConfig)
+
+func (f constructorOptionFunc) applyConstructor(c *constructorConfig) { f(c) }
+
+// WithName gives the constructor result a name for disambiguation.
+// Use this when you have multiple implementations of the same type.
 //
-// The factory function receives the resolved dependencies in order and returns
-// the service instance and an optional error.
+// Example:
 //
-// Usage:
+//	Provide(c, NewPrimaryDB, WithName("primary"))
+//	Provide(c, NewReplicaDB, WithName("replica"))
+func WithName(name string) ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.name = name
+	})
+}
+
+// WithAliases registers the constructor result under additional named variants.
+// The primary registration is by TYPE (unnamed), and aliases provide named access.
+// This allows the service to be resolved both by type and by name.
 //
-//	di.Provide[*UserService](c, "userService",
-//	    di.Inject[*bun.DB]("database"),
-//	    di.Inject[Logger]("logger"),
-//	    di.LazyInject[*Cache]("cache"),
-//	    func(db *bun.DB, logger Logger, cache *Lazy[*Cache]) (*UserService, error) {
-//	        return &UserService{db, logger, cache}, nil
-//	    },
-//	)
-func Provide[T any](c Vessel, name string, args ...any) error {
-	// Separate inject options from the factory function
-	var (
-		injectOpts []InjectOption
-		factoryFn  any
-	)
+// Example:
+//
+//	// Register by type with named aliases
+//	Provide(c, NewDatabaseManager, WithAliases("manager", "db-manager"))
+//
+//	// Can resolve by type (unnamed):
+//	mgr1, _ := Inject[*DatabaseManager](c)
+//
+//	// Or by any alias name:
+//	mgr2, _ := InjectNamed[*DatabaseManager](c, "manager")
+//	mgr3, _ := InjectNamed[*DatabaseManager](c, "db-manager")
+//	// mgr1 == mgr2 == mgr3 (same singleton instance)
+//
+// Note: If you use WithName(), that becomes the primary name and aliases are additional.
+// Using only WithAliases() keeps the service unnamed (type-based) as primary.
+func WithAliases(names ...string) ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.aliases = append(c.aliases, names...)
+	})
+}
 
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case InjectOption:
-			injectOpts = append(injectOpts, v)
-		case di.RegisterOption:
-			// Ignore register options here, they're handled separately
-		default:
-			// Assume it's the factory function
-			if factoryFn != nil {
-				return fmt.Errorf("provide %s: multiple factory functions provided", name)
+// AsGroup adds the constructor result to a value group.
+// Services in the same group can be resolved together as a slice.
+//
+// Example:
+//
+//	Provide(c, NewUserHandler, AsGroup("handlers"))
+//	Provide(c, NewProductHandler, AsGroup("handlers"))
+//	handlers := InjectGroup[Handler](c, "handlers") // Returns []Handler
+func AsGroup(group string) ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.group = group
+	})
+}
+
+// As registers the constructor result as additional interface types.
+// This enables resolving the service by its interface types.
+//
+// Example:
+//
+//	Provide(c, NewMyService, As(new(Reader), new(Writer)))
+func As(ifaces ...any) ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		for _, iface := range ifaces {
+			t := reflect.TypeOf(iface)
+			if t.Kind() == reflect.Ptr {
+				t = t.Elem()
 			}
-
-			factoryFn = arg
+			c.asTypes = append(c.asTypes, t)
 		}
-	}
-
-	if factoryFn == nil {
-		return fmt.Errorf("provide %s: no factory function provided", name)
-	}
-
-	// Extract dependencies for the graph
-	deps := ExtractDeps(injectOpts)
-
-	// Create the wrapper factory that resolves dependencies
-	factory := func(container Vessel) (any, error) {
-		// Resolve all dependencies according to their modes
-		resolvedDeps := make([]any, len(injectOpts))
-
-		for i, opt := range injectOpts {
-			resolved, err := resolveDep(container, opt)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve dependency %s: %w", opt.Dep.Name, err)
-			}
-
-			resolvedDeps[i] = resolved
-		}
-
-		// Call the factory function with resolved dependencies
-		return callFactory(factoryFn, resolvedDeps)
-	}
-
-	// Register with the container using the new deps
-	return c.Register(name, factory, di.WithDeps(deps...))
+	})
 }
 
-// ProvideWithOpts is like Provide but accepts additional RegisterOptions.
-func ProvideWithOpts[T any](c Vessel, name string, opts []di.RegisterOption, args ...any) error {
-	// Separate inject options from the factory function
-	var (
-		injectOpts []InjectOption
-		factoryFn  any
-	)
-
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case InjectOption:
-			injectOpts = append(injectOpts, v)
-		default:
-			if factoryFn != nil {
-				return fmt.Errorf("provide %s: multiple factory functions provided", name)
-			}
-
-			factoryFn = arg
-		}
-	}
-
-	if factoryFn == nil {
-		return fmt.Errorf("provide %s: no factory function provided", name)
-	}
-
-	// Extract dependencies for the graph
-	deps := ExtractDeps(injectOpts)
-
-	// Create the wrapper factory that resolves dependencies
-	factory := func(container Vessel) (any, error) {
-		resolvedDeps := make([]any, len(injectOpts))
-
-		for i, opt := range injectOpts {
-			resolved, err := resolveDep(container, opt)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve dependency %s: %w", opt.Dep.Name, err)
-			}
-
-			resolvedDeps[i] = resolved
-		}
-
-		return callFactory(factoryFn, resolvedDeps)
-	}
-
-	// Merge deps into options
-	allOpts := append(opts, di.WithDeps(deps...))
-
-	return c.Register(name, factory, allOpts...)
+// AsSingleton makes the constructor result a singleton (default).
+func AsSingleton() ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.lifecycle = "singleton"
+	})
 }
 
-// resolveDep resolves a single dependency based on its mode.
-func resolveDep(c Vessel, opt InjectOption) (any, error) {
-	switch opt.Dep.Mode {
-	case di.DepEager:
-		// Resolve immediately, fail if not found
-		return c.Resolve(opt.Dep.Name)
-
-	case di.DepLazy:
-		// Return a Lazy wrapper
-		return createLazyWrapper(c, opt)
-
-	case di.DepOptional:
-		// Resolve immediately, return nil if not found
-		if !c.Has(opt.Dep.Name) {
-			return nil, nil
-		}
-
-		return c.Resolve(opt.Dep.Name)
-
-	case di.DepLazyOptional:
-		// Return an OptionalLazy wrapper
-		return createOptionalLazyWrapper(c, opt)
-
-	default:
-		return nil, fmt.Errorf("unknown dependency mode: %v", opt.Dep.Mode)
-	}
+// AsTransient makes the constructor create a new instance on each resolve.
+func AsTransient() ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.lifecycle = "transient"
+	})
 }
 
-// createLazyWrapper creates a Lazy[T] wrapper for the dependency.
-// Since we can't use generics dynamically, we return a LazyAny wrapper.
-func createLazyWrapper(c Vessel, opt InjectOption) (*LazyAny, error) {
-	return NewLazyAny(c, opt.Dep.Name, opt.TypeInfo), nil
+// AsScoped makes the constructor result scoped to request lifetime.
+func AsScoped() ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.lifecycle = "scoped"
+	})
 }
 
-// createOptionalLazyWrapper creates an OptionalLazy wrapper.
-func createOptionalLazyWrapper(c Vessel, opt InjectOption) (*OptionalLazyAny, error) {
-	return NewOptionalLazyAny(c, opt.Dep.Name, opt.TypeInfo), nil
+// WithEager causes the constructor to be invoked immediately after registration,
+// rather than waiting for first use (lazy). This is useful for:
+//   - Fail-fast behavior: catch construction errors at startup
+//   - Services that need to initialize during app startup (servers, connections)
+//   - Pre-warming caches
+//
+// Example:
+//
+//	// Start database connection immediately, fail if can't connect
+//	Provide(c, NewDatabase, WithEager())
+//
+//	// Lazy (default): Wait until first use
+//	Provide(c, NewCache)
+func WithEager() ConstructorOption {
+	return constructorOptionFunc(func(c *constructorConfig) {
+		c.eager = true
+	})
 }
 
-// callFactory calls the factory function with the resolved dependencies.
-func callFactory(factoryFn any, deps []any) (any, error) {
-	fnValue := reflect.ValueOf(factoryFn)
-	fnType := fnValue.Type()
-
-	if fnType.Kind() != reflect.Func {
-		return nil, fmt.Errorf("factory must be a function, got %T", factoryFn)
-	}
-
-	// Verify parameter count matches
-	if fnType.NumIn() != len(deps) {
-		return nil, fmt.Errorf("factory expects %d parameters, got %d dependencies", fnType.NumIn(), len(deps))
-	}
-
-	// Build arguments
-	args := make([]reflect.Value, len(deps))
-	for i, dep := range deps {
-		if dep == nil {
-			// For optional deps, use zero value
-			args[i] = reflect.Zero(fnType.In(i))
-		} else {
-			args[i] = reflect.ValueOf(dep)
-		}
-	}
-
-	// Call the factory
-	results := fnValue.Call(args)
-
-	// Handle return values
-	switch fnType.NumOut() {
-	case 1:
-		// Returns only the service
-		return results[0].Interface(), nil
-	case 2:
-		// Returns service and error
-		if !results[1].IsNil() {
-			return nil, results[1].Interface().(error)
-		}
-
-		return results[0].Interface(), nil
-	default:
-		return nil, fmt.Errorf("factory must return (T) or (T, error), got %d return values", fnType.NumOut())
-	}
-}
-
-// LazyAny is a non-generic lazy wrapper that can hold any type.
-// This is needed because we can't create Lazy[T] dynamically at runtime.
-type LazyAny struct {
-	container  Vessel
-	name       string
-	expectedTy reflect.Type
-	resolved   bool
-	value      any
-	err        error
-}
-
-// NewLazyAny creates a new lazy wrapper for any type.
-func NewLazyAny(c Vessel, name string, expectedType reflect.Type) *LazyAny {
-	return &LazyAny{
-		container:  c,
-		name:       name,
-		expectedTy: expectedType,
-	}
-}
-
-// Get resolves the dependency and returns it.
-func (l *LazyAny) Get() (any, error) {
-	if l.resolved {
-		return l.value, l.err
-	}
-
-	instance, err := l.container.Resolve(l.name)
+// Provide registers a constructor function with automatic dependency resolution.
+// Dependencies are inferred from function parameters and all return types (except error)
+// are registered as services.
+//
+// This follows the Uber dig pattern for constructor-based dependency injection:
+//   - Function parameters become dependencies (resolved by type)
+//   - Return types become provided services
+//   - Error return type is handled for construction failures
+//
+// Example:
+//
+//	// Simple constructor
+//	func NewUserService(db *Database, logger *Logger) *UserService {
+//	    return &UserService{db: db, logger: logger}
+//	}
+//	Provide(c, NewUserService)
+//
+//	// Constructor with error
+//	func NewDatabase(config *Config) (*Database, error) {
+//	    return sql.Open(config.Driver, config.DSN)
+//	}
+//	Provide(c, NewDatabase)
+//
+//	// Using In struct for many dependencies
+//	type ServiceParams struct {
+//	    vessel.In
+//	    DB     *Database
+//	    Logger *Logger `optional:"true"`
+//	}
+//	func NewService(p ServiceParams) *Service {
+//	    return &Service{db: p.DB, logger: p.Logger}
+//	}
+//	Provide(c, NewService)
+func Provide(c Vessel, constructor any, opts ...ConstructorOption) error {
+	// Analyze the constructor
+	info, err := analyzeConstructor(constructor)
 	if err != nil {
-		l.err = err
-		l.resolved = true
-
-		return nil, err
+		return fmt.Errorf("invalid constructor: %w", err)
 	}
 
-	l.value = instance
-	l.resolved = true
-
-	return l.value, nil
-}
-
-// MustGet resolves the dependency and returns it, panicking on error.
-func (l *LazyAny) MustGet() any {
-	value, err := l.Get()
-	if err != nil {
-		panic(fmt.Sprintf("lazy dependency %s failed: %v", l.name, err))
+	// Apply options
+	config := &constructorConfig{
+		lifecycle: "singleton", // Default to singleton like dig
+	}
+	for _, opt := range opts {
+		opt.applyConstructor(config)
 	}
 
-	return value
-}
-
-// IsResolved returns true if the dependency has been resolved.
-func (l *LazyAny) IsResolved() bool {
-	return l.resolved
-}
-
-// Name returns the name of the dependency.
-func (l *LazyAny) Name() string {
-	return l.name
-}
-
-// OptionalLazyAny is a non-generic optional lazy wrapper.
-type OptionalLazyAny struct {
-	container  Vessel
-	name       string
-	expectedTy reflect.Type
-	resolved   bool
-	found      bool
-	value      any
-	err        error
-}
-
-// NewOptionalLazyAny creates a new optional lazy wrapper.
-func NewOptionalLazyAny(c Vessel, name string, expectedType reflect.Type) *OptionalLazyAny {
-	return &OptionalLazyAny{
-		container:  c,
-		name:       name,
-		expectedTy: expectedType,
-	}
-}
-
-// Get resolves the dependency and returns it.
-func (l *OptionalLazyAny) Get() (any, error) {
-	if l.resolved {
-		return l.value, l.err
+	// Get the container implementation
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return fmt.Errorf("Provide requires *containerImpl, got %T", c)
 	}
 
-	if !l.container.Has(l.name) {
-		l.resolved = true
-		l.found = false
-
-		return nil, nil
+	// Ensure type registry exists
+	if impl.typeRegistry == nil {
+		impl.typeRegistry = newTypeRegistry()
 	}
 
-	instance, err := l.container.Resolve(l.name)
-	if err != nil {
-		l.err = err
-		l.resolved = true
+	// Create factory function that auto-resolves dependencies
+	factory := createAutoResolveFactory(info, impl)
 
-		return nil, err
-	}
+	// Register each result type
+	results := info.flattenResults()
+	for _, result := range results {
+		// Use configured name or result-specific name
+		name := config.name
+		if result.name != "" {
+			name = result.name
+		}
 
-	l.value = instance
-	l.resolved = true
-	l.found = true
+		key := typeKey{typ: result.typ, name: name}
 
-	return l.value, nil
-}
+		// Determine groups for this result
+		groups := []string{}
+		if config.group != "" {
+			groups = append(groups, config.group)
+		}
+		if result.group != "" {
+			groups = append(groups, result.group)
+		}
 
-// MustGet resolves the dependency and returns it, panicking on error.
-func (l *OptionalLazyAny) MustGet() any {
-	value, err := l.Get()
-	if err != nil {
-		panic(fmt.Sprintf("optional lazy dependency %s failed: %v", l.name, err))
-	}
+		// Create wrapper factory for multi-result constructors (Out structs)
+		resultFactory := factory
+		if len(results) > 1 && result.fieldName != "" {
+			resultFactory = createMultiResultFactory(factory, result.fieldName, result.typ)
+		}
 
-	return value
-}
+		reg := &typeRegistration{
+			key:         key,
+			constructor: info,
+			factory:     resultFactory,
+			lifecycle:   config.lifecycle,
+			groups:      groups,
+		}
 
-// IsResolved returns true if the dependency has been resolved.
-func (l *OptionalLazyAny) IsResolved() bool {
-	return l.resolved
-}
+		if err := impl.typeRegistry.register(key, reg); err != nil {
+			return err
+		}
 
-// IsFound returns true if the dependency was found.
-func (l *OptionalLazyAny) IsFound() bool {
-	return l.found
-}
-
-// Name returns the name of the dependency.
-func (l *OptionalLazyAny) Name() string {
-	return l.name
-}
-
-// ResolveWithDeps resolves a service and its dependencies according to the Dep specs.
-// This is used internally when resolving services that declare dependencies.
-func ResolveWithDeps(ctx context.Context, c Vessel, name string, deps []di.Dep) error {
-	for _, dep := range deps {
-		switch dep.Mode {
-		case di.DepEager:
-			// Resolve and start the dependency
-			if _, err := c.ResolveReady(ctx, dep.Name); err != nil {
-				return fmt.Errorf("failed to resolve eager dependency %s: %w", dep.Name, err)
+		// Also register as additional interface types
+		for _, asType := range config.asTypes {
+			asKey := typeKey{typ: asType, name: name}
+			asReg := &typeRegistration{
+				key:         asKey,
+				constructor: info,
+				factory:     resultFactory,
+				lifecycle:   config.lifecycle,
+				groups:      groups,
 			}
-		case di.DepOptional:
-			// Resolve if exists, ignore if not found
-			if c.Has(dep.Name) {
-				if _, err := c.ResolveReady(ctx, dep.Name); err != nil {
-					return fmt.Errorf("failed to resolve optional dependency %s: %w", dep.Name, err)
+			if err := impl.typeRegistry.register(asKey, asReg); err != nil {
+				return err
+			}
+		}
+
+		// Register under additional aliases
+		// NOTE: Aliases point to the SAME registration object to share singleton instances
+		for _, alias := range config.aliases {
+			aliasKey := typeKey{typ: result.typ, name: alias}
+			if err := impl.typeRegistry.register(aliasKey, reg); err != nil {
+				return fmt.Errorf("failed to register alias %q: %w", alias, err)
+			}
+
+			// Also register aliases for additional interface types
+			// These share the same registration as the corresponding asType registration
+			for i, asType := range config.asTypes {
+				aliasAsKey := typeKey{typ: asType, name: alias}
+				// Find the corresponding asType registration to share
+				asKey := typeKey{typ: asType, name: name}
+				asReg, ok := impl.typeRegistry.get(asKey)
+				if !ok {
+					// This shouldn't happen since we just registered it above
+					return fmt.Errorf("failed to find registration for type %s", asType)
 				}
+				if err := impl.typeRegistry.register(aliasAsKey, asReg); err != nil {
+					return fmt.Errorf("failed to register alias %q for type %s: %w", alias, asType, err)
+				}
+				_ = i // Unused but kept for clarity
 			}
-			// Lazy and LazyOptional are resolved on-demand, not here
+		}
+
+		// Eager instantiation: trigger construction immediately
+		if config.eager {
+			// Resolve the primary key to trigger instantiation
+			_, err := impl.typeRegistry.resolve(key, c)
+			if err != nil {
+				return fmt.Errorf("eager instantiation failed for %s: %w", key, err)
+			}
 		}
 	}
 
 	return nil
+}
+
+func ProvideConstructor(c Vessel, constructor any, opts ...ConstructorOption) error {
+	return Provide(c, constructor, opts...)
+}
+
+func InjectType[T any](c Vessel) (T, error) {
+	return Inject[T](c)
+}
+
+// ProvideNamed registers a named constructor function with automatic dependency resolution.
+// This is equivalent to calling Provide with WithName(name).
+//
+// Example:
+//
+//	ProvideNamed(c, "primary", NewPrimaryDB)
+//	ProvideNamed(c, "replica", NewReplicaDB)
+func ProvideNamed(c Vessel, name string, constructor any, opts ...ConstructorOption) error {
+	return Provide(c, constructor, append([]ConstructorOption{WithName(name)}, opts...)...)
+}
+
+// createAutoResolveFactory creates a factory that automatically resolves
+// constructor parameters from the container
+func createAutoResolveFactory(info *constructorInfo, impl *containerImpl) Factory {
+	return func(container Vessel) (any, error) {
+		// Build arguments for the constructor call
+		args := make([]reflect.Value, len(info.params))
+
+		for i, param := range info.params {
+			if param.isIn {
+				// Create In struct and populate fields
+				inValue, err := resolveInStruct(param, impl)
+				if err != nil {
+					return nil, err
+				}
+				args[i] = inValue
+			} else {
+				// Resolve single parameter by type
+				resolved, err := resolveParam(param, impl)
+				if err != nil {
+					return nil, err
+				}
+				args[i] = reflect.ValueOf(resolved)
+			}
+		}
+
+		// Call the constructor
+		results := info.fn.Call(args)
+
+		// Handle error return
+		if info.hasError {
+			errResult := results[len(results)-1]
+			if !errResult.IsNil() {
+				return nil, errResult.Interface().(error)
+			}
+			results = results[:len(results)-1]
+		}
+
+		// Return primary result
+		if len(results) == 0 {
+			return nil, fmt.Errorf("constructor returned no results")
+		}
+
+		// For Out structs, return the struct itself (extraction happens in multi-result factory)
+		return results[0].Interface(), nil
+	}
+}
+
+// resolveInStruct creates and populates an In struct with resolved dependencies
+func resolveInStruct(param paramInfo, impl *containerImpl) (reflect.Value, error) {
+	structType := param.typ
+	isPtr := structType.Kind() == reflect.Ptr
+	if isPtr {
+		structType = structType.Elem()
+	}
+
+	structValue := reflect.New(structType).Elem()
+
+	for _, field := range param.inFields {
+		var resolved any
+		var err error
+
+		if field.group {
+			// Resolve group as slice
+			resolved, err = resolveGroup(field, impl)
+		} else {
+			// Resolve single dependency
+			resolved, err = resolveParam(field, impl)
+		}
+
+		if err != nil {
+			if field.optional {
+				// Leave as zero value for optional dependencies
+				continue
+			}
+			return reflect.Value{}, err
+		}
+
+		if resolved != nil {
+			structValue.Field(field.index).Set(reflect.ValueOf(resolved))
+		}
+	}
+
+	if isPtr {
+		ptrValue := reflect.New(structType)
+		ptrValue.Elem().Set(structValue)
+		return ptrValue, nil
+	}
+
+	return structValue, nil
+}
+
+// resolveParam resolves a single parameter from the type registry
+func resolveParam(param paramInfo, impl *containerImpl) (any, error) {
+	key := typeKey{typ: param.typ, name: param.name}
+
+	// Try type registry first
+	if impl.typeRegistry != nil {
+		if reg, ok := impl.typeRegistry.get(key); ok {
+			return reg.resolve(impl)
+		}
+	}
+
+	// If not found and optional, return nil
+	if param.optional {
+		return nil, nil
+	}
+
+	return nil, fmt.Errorf("no provider for type %s", key)
+}
+
+// resolveGroup resolves all services in a group as a slice
+func resolveGroup(param paramInfo, impl *containerImpl) (any, error) {
+	if impl.typeRegistry == nil {
+		if param.optional {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("no providers for group %s", param.groupKey)
+	}
+
+	regs := impl.typeRegistry.getGroup(param.groupKey)
+	if len(regs) == 0 {
+		if param.optional {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("no providers for group %s", param.groupKey)
+	}
+
+	// Create slice of the element type
+	elemType := param.typ.Elem() // param.typ is a slice, get element type
+	sliceValue := reflect.MakeSlice(param.typ, 0, len(regs))
+
+	for _, reg := range regs {
+		instance, err := reg.resolve(impl)
+		if err != nil {
+			return nil, err
+		}
+		sliceValue = reflect.Append(sliceValue, reflect.ValueOf(instance).Convert(elemType))
+	}
+
+	return sliceValue.Interface(), nil
+}
+
+// createMultiResultFactory wraps a factory to extract a specific result from Out struct
+func createMultiResultFactory(baseFactory Factory, fieldName string, resultType reflect.Type) Factory {
+	return func(container Vessel) (any, error) {
+		result, err := baseFactory(container)
+		if err != nil {
+			return nil, err
+		}
+
+		// Extract the specific field from Out struct by name
+		resultValue := reflect.ValueOf(result)
+		if resultValue.Kind() == reflect.Ptr {
+			resultValue = resultValue.Elem()
+		}
+
+		if resultValue.Kind() != reflect.Struct {
+			// Not an Out struct, return as-is (single result)
+			return result, nil
+		}
+
+		// Find the field by name
+		fieldValue := resultValue.FieldByName(fieldName)
+		if !fieldValue.IsValid() {
+			return nil, fmt.Errorf("field %s not found in result struct", fieldName)
+		}
+		return fieldValue.Interface(), nil
+	}
+}
+
+// Inject resolves a service by its type.
+//
+// Example:
+//
+//	db, err := Inject[*Database](c)
+func Inject[T any](c Vessel) (T, error) {
+	var zero T
+	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
+
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return zero, fmt.Errorf("Inject requires *containerImpl, got %T", c)
+	}
+
+	if impl.typeRegistry == nil {
+		return zero, fmt.Errorf("no type registry available")
+	}
+
+	key := typeKey{typ: t}
+	instance, err := impl.typeRegistry.resolve(key, c)
+	if err != nil {
+		return zero, err
+	}
+
+	typed, ok := instance.(T)
+	if !ok {
+		return zero, fmt.Errorf("type mismatch: expected %T, got %T", zero, instance)
+	}
+
+	return typed, nil
+}
+
+// MustInject resolves a service by its type, panicking on error.
+func MustInject[T any](c Vessel) T {
+	result, err := Inject[T](c)
+	if err != nil {
+		panic(fmt.Sprintf("MustInject failed: %v", err))
+	}
+	return result
+}
+
+// InjectNamed resolves a named service by its type.
+// Use this when you have multiple implementations of the same type.
+//
+// Example:
+//
+//	primaryDB, err := InjectNamed[*Database](c, "primary")
+//	replicaDB, err := InjectNamed[*Database](c, "replica")
+func InjectNamed[T any](c Vessel, name string) (T, error) {
+	var zero T
+	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
+
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return zero, fmt.Errorf("InjectNamed requires *containerImpl, got %T", c)
+	}
+
+	if impl.typeRegistry == nil {
+		return zero, fmt.Errorf("no type registry available")
+	}
+
+	key := typeKey{typ: t, name: name}
+	instance, err := impl.typeRegistry.resolve(key, c)
+	if err != nil {
+		return zero, err
+	}
+
+	typed, ok := instance.(T)
+	if !ok {
+		return zero, fmt.Errorf("type mismatch: expected %T, got %T", zero, instance)
+	}
+
+	return typed, nil
+}
+
+// MustInjectNamed resolves a named service by its type, panicking on error.
+func MustInjectNamed[T any](c Vessel, name string) T {
+	result, err := InjectNamed[T](c, name)
+	if err != nil {
+		panic(fmt.Sprintf("MustInjectNamed failed: %v", err))
+	}
+	return result
+}
+
+// InjectGroup resolves all services in a group as a slice.
+//
+// Example:
+//
+//	handlers, err := InjectGroup[Handler](c, "http")
+func InjectGroup[T any](c Vessel, group string) ([]T, error) {
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return nil, fmt.Errorf("InjectGroup requires *containerImpl, got %T", c)
+	}
+
+	if impl.typeRegistry == nil {
+		return nil, fmt.Errorf("no type registry available")
+	}
+
+	regs := impl.typeRegistry.getGroup(group)
+	if len(regs) == 0 {
+		return nil, nil // Empty slice for empty groups
+	}
+
+	result := make([]T, 0, len(regs))
+	for _, reg := range regs {
+		instance, err := reg.resolve(c)
+		if err != nil {
+			return nil, err
+		}
+		typed, ok := instance.(T)
+		if !ok {
+			return nil, fmt.Errorf("type mismatch in group %s: expected %T, got %T", group, *new(T), instance)
+		}
+		result = append(result, typed)
+	}
+
+	return result, nil
+}
+
+// MustInjectGroup resolves all services in a group, panicking on error.
+func MustInjectGroup[T any](c Vessel, group string) []T {
+	result, err := InjectGroup[T](c, group)
+	if err != nil {
+		panic(fmt.Sprintf("MustInjectGroup failed: %v", err))
+	}
+	return result
+}
+
+// HasType checks if a service of the given type is registered.
+func HasType[T any](c Vessel) bool {
+	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
+
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return false
+	}
+
+	if impl.typeRegistry == nil {
+		return false
+	}
+
+	return impl.typeRegistry.has(typeKey{typ: t})
+}
+
+// HasTypeNamed checks if a named service of the given type is registered.
+func HasTypeNamed[T any](c Vessel, name string) bool {
+	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
+
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return false
+	}
+
+	if impl.typeRegistry == nil {
+		return false
+	}
+
+	return impl.typeRegistry.has(typeKey{typ: t, name: name})
 }

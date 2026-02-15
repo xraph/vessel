@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xraph/go-utils/di"
 	"github.com/xraph/go-utils/errs"
 )
 
@@ -158,10 +159,10 @@ func TestRegister_WithOptions(t *testing.T) {
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return "value", nil
 	},
-		Transient(),
-		WithDependencies("dep1", "dep2"),
-		WithDIMetadata("key", "value"),
-		WithGroup("group1"),
+		di.Transient(),
+		di.WithDependencies("dep1", "dep2"),
+		di.WithDIMetadata("key", "value"),
+		di.WithGroup("group1"),
 	)
 
 	require.NoError(t, err)
@@ -180,7 +181,7 @@ func TestResolve_Singleton(t *testing.T) {
 		callCount++
 
 		return &mockService{name: "singleton"}, nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	// First resolve
@@ -205,7 +206,7 @@ func TestResolve_Transient(t *testing.T) {
 		callCount++
 
 		return &mockService{name: "test"}, nil
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	// First resolve
@@ -227,7 +228,7 @@ func TestResolve_Scoped_FromContainer(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return "scoped-value", nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	// Resolving scoped service directly from container should fail
@@ -333,7 +334,7 @@ func TestStart_WithDependencies(t *testing.T) {
 				return nil
 			}(),
 		}, nil
-	}, WithDependencies("dep1"))
+	}, di.WithDependencies("dep1"))
 	require.NoError(t, err)
 
 	err = c.Register("main", func(c Vessel) (any, error) {
@@ -345,7 +346,7 @@ func TestStart_WithDependencies(t *testing.T) {
 				return nil
 			}(),
 		}, nil
-	}, WithDependencies("dep1", "dep2"))
+	}, di.WithDependencies("dep1", "dep2"))
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -380,7 +381,7 @@ func TestStart_ServiceError(t *testing.T) {
 
 	err = c.Register("svc2", func(c Vessel) (any, error) {
 		return svc2, nil
-	}, WithDependencies("svc1"))
+	}, di.WithDependencies("svc1"))
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -450,7 +451,7 @@ func TestStop_ReverseOrder(t *testing.T) {
 				mu.Unlock()
 			},
 		}, nil
-	}, WithDependencies("dep1"))
+	}, di.WithDependencies("dep1"))
 	require.NoError(t, err)
 
 	// Start services
@@ -513,9 +514,9 @@ func TestInspect(t *testing.T) {
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &mockService{name: "test"}, nil
 	},
-		Singleton(),
-		WithDependencies("dep1"),
-		WithDIMetadata("version", "1.0"),
+		di.Singleton(),
+		di.WithDependencies("dep1"),
+		di.WithDIMetadata("version", "1.0"),
 	)
 	require.NoError(t, err)
 
@@ -550,7 +551,7 @@ func TestInspect_Lifecycles(t *testing.T) {
 	// Singleton
 	err := c.Register("singleton", func(c Vessel) (any, error) {
 		return "value", nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	info := c.Inspect("singleton")
@@ -559,7 +560,7 @@ func TestInspect_Lifecycles(t *testing.T) {
 	// Scoped
 	err = c.Register("scoped", func(c Vessel) (any, error) {
 		return "value", nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	info = c.Inspect("scoped")
@@ -568,7 +569,7 @@ func TestInspect_Lifecycles(t *testing.T) {
 	// Transient
 	err = c.Register("transient", func(c Vessel) (any, error) {
 		return "value", nil
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	info = c.Inspect("transient")
@@ -585,7 +586,7 @@ func TestConcurrentResolve(t *testing.T) {
 		callCount++
 
 		return "value", nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	// Resolve concurrently
@@ -734,7 +735,7 @@ func TestResolveReady_WithDependencies(t *testing.T) {
 				mu.Unlock()
 			},
 		}, nil
-	}, WithDependencies("dep"))
+	}, di.WithDependencies("dep"))
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -970,7 +971,7 @@ func TestResolve_WithDependencies_AutoStartsInOrder(t *testing.T) {
 		}
 
 		return mainSvc, nil
-	}, WithDependencies("dep"))
+	}, di.WithDependencies("dep"))
 	require.NoError(t, err)
 
 	// Resolve main - should auto-start both dep and main

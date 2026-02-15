@@ -5,24 +5,38 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xraph/go-utils/di"
 )
+
+// registerTestServices is a test helper to register multiple services sequentially.
+func registerTestServices(t *testing.T, c Vessel, registrations ...func(Vessel) error) {
+	t.Helper()
+	for _, reg := range registrations {
+		require.NoError(t, reg(c))
+	}
+}
+
+func reg(name string, factory Factory, opts ...RegisterOption) func(Vessel) error {
+	return func(c Vessel) error {
+		return c.Register(name, factory, opts...)
+	}
+}
 
 func TestQuery_ByLifecycle(t *testing.T) {
 	c := New()
 
 	// Register services with different lifecycles
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, Singleton()),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.Singleton()),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, Transient()),
-		Service("svc3", func(c Vessel) (any, error) {
+		}, di.Transient()),
+		reg("svc3", func(c Vessel) (any, error) {
 			return &testService{value: "svc3"}, nil
-		}, Scoped()),
+		}, di.Scoped()),
 	)
-	require.NoError(t, err)
 
 	// Query for singletons
 	results := Query(c, ServiceQuery{Lifecycle: "singleton"})
@@ -44,18 +58,17 @@ func TestQuery_ByGroup(t *testing.T) {
 	c := New()
 
 	// Register services in different groups
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, WithGroup("api")),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.WithGroup("api")),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, WithGroup("db")),
-		Service("svc3", func(c Vessel) (any, error) {
+		}, di.WithGroup("db")),
+		reg("svc3", func(c Vessel) (any, error) {
 			return &testService{value: "svc3"}, nil
-		}, WithGroup("api")),
+		}, di.WithGroup("api")),
 	)
-	require.NoError(t, err)
 
 	// Query for api group
 	results := Query(c, ServiceQuery{Group: "api"})
@@ -74,18 +87,17 @@ func TestQuery_ByMetadata(t *testing.T) {
 	c := New()
 
 	// Register services with metadata
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, WithDIMetadata("version", "1.0"), WithDIMetadata("env", "prod")),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.WithDIMetadata("version", "1.0"), di.WithDIMetadata("env", "prod")),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, WithDIMetadata("version", "2.0"), WithDIMetadata("env", "dev")),
-		Service("svc3", func(c Vessel) (any, error) {
+		}, di.WithDIMetadata("version", "2.0"), di.WithDIMetadata("env", "dev")),
+		reg("svc3", func(c Vessel) (any, error) {
 			return &testService{value: "svc3"}, nil
-		}, WithDIMetadata("version", "1.0"), WithDIMetadata("env", "dev")),
+		}, di.WithDIMetadata("version", "1.0"), di.WithDIMetadata("env", "dev")),
 	)
-	require.NoError(t, err)
 
 	// Query for version 1.0
 	results := Query(c, ServiceQuery{
@@ -111,23 +123,22 @@ func TestQuery_ByStarted(t *testing.T) {
 	c := New()
 
 	// Register services
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, Singleton()),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.Singleton()),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, Singleton()),
-		Service("svc3", func(c Vessel) (any, error) {
+		}, di.Singleton()),
+		reg("svc3", func(c Vessel) (any, error) {
 			return &testService{value: "svc3"}, nil
-		}, Singleton()),
+		}, di.Singleton()),
 	)
-	require.NoError(t, err)
 
 	// Resolve svc1 and svc2 (starts singletons)
-	_, err = Resolve[*testService](c, "svc1")
+	_, err := c.Resolve("svc1")
 	require.NoError(t, err)
-	_, err = Resolve[*testService](c, "svc2")
+	_, err = c.Resolve("svc2")
 	require.NoError(t, err)
 
 	// Query for started services
@@ -149,21 +160,20 @@ func TestQuery_Combined(t *testing.T) {
 	c := New()
 
 	// Register services
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, Singleton(), WithGroup("api"), WithDIMetadata("version", "1.0")),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.Singleton(), di.WithGroup("api"), di.WithDIMetadata("version", "1.0")),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, Singleton(), WithGroup("api"), WithDIMetadata("version", "2.0")),
-		Service("svc3", func(c Vessel) (any, error) {
+		}, di.Singleton(), di.WithGroup("api"), di.WithDIMetadata("version", "2.0")),
+		reg("svc3", func(c Vessel) (any, error) {
 			return &testService{value: "svc3"}, nil
-		}, Transient(), WithGroup("db"), WithDIMetadata("version", "1.0")),
+		}, di.Transient(), di.WithGroup("db"), di.WithDIMetadata("version", "1.0")),
 	)
-	require.NoError(t, err)
 
 	// Resolve svc1
-	_, err = Resolve[*testService](c, "svc1")
+	_, err := c.Resolve("svc1")
 	require.NoError(t, err)
 
 	// Query for singleton + api group + version 1.0 + started
@@ -182,18 +192,17 @@ func TestQueryNames(t *testing.T) {
 	c := New()
 
 	// Register services
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, WithGroup("api")),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.WithGroup("api")),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, WithGroup("api")),
-		Service("svc3", func(c Vessel) (any, error) {
+		}, di.WithGroup("api")),
+		reg("svc3", func(c Vessel) (any, error) {
 			return &testService{value: "svc3"}, nil
-		}, WithGroup("db")),
+		}, di.WithGroup("db")),
 	)
-	require.NoError(t, err)
 
 	// Query for api group names
 	names := QueryNames(c, ServiceQuery{Group: "api"})
@@ -206,15 +215,14 @@ func TestFindByGroup(t *testing.T) {
 	c := New()
 
 	// Register services
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, WithGroup("api")),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.WithGroup("api")),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, WithGroup("api")),
+		}, di.WithGroup("api")),
 	)
-	require.NoError(t, err)
 
 	results := FindByGroup(c, "api")
 	assert.Len(t, results, 2)
@@ -224,15 +232,14 @@ func TestFindByLifecycle(t *testing.T) {
 	c := New()
 
 	// Register services
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
-		}, Singleton()),
-		Service("svc2", func(c Vessel) (any, error) {
+		}, di.Singleton()),
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
-		}, Singleton()),
+		}, di.Singleton()),
 	)
-	require.NoError(t, err)
 
 	results := FindByLifecycle(c, "singleton")
 	assert.Len(t, results, 2)
@@ -242,12 +249,12 @@ func TestFindStarted(t *testing.T) {
 	c := New()
 
 	// Register and resolve services
-	err := RegisterSingleton(c, "svc1", func(c Vessel) (*testService, error) {
+	err := c.Register("svc1", func(c Vessel) (any, error) {
 		return &testService{value: "svc1"}, nil
-	})
+	}, di.Singleton())
 	require.NoError(t, err)
 
-	_, err = Resolve[*testService](c, "svc1")
+	_, err = c.Resolve("svc1")
 	require.NoError(t, err)
 
 	results := FindStarted(c)
@@ -259,9 +266,9 @@ func TestFindNotStarted(t *testing.T) {
 	c := New()
 
 	// Register but don't resolve
-	err := RegisterSingleton(c, "svc1", func(c Vessel) (*testService, error) {
+	err := c.Register("svc1", func(c Vessel) (any, error) {
 		return &testService{value: "svc1"}, nil
-	})
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	results := FindNotStarted(c)
@@ -273,9 +280,9 @@ func TestQuery_NoMatches(t *testing.T) {
 	c := New()
 
 	// Register a service
-	err := RegisterSingleton(c, "svc1", func(c Vessel) (*testService, error) {
+	err := c.Register("svc1", func(c Vessel) (any, error) {
 		return &testService{value: "svc1"}, nil
-	})
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	// Query for nonexistent group
@@ -287,15 +294,14 @@ func TestQuery_EmptyQuery(t *testing.T) {
 	c := New()
 
 	// Register services
-	err := RegisterServices(c,
-		Service("svc1", func(c Vessel) (any, error) {
+	registerTestServices(t, c,
+		reg("svc1", func(c Vessel) (any, error) {
 			return &testService{value: "svc1"}, nil
 		}),
-		Service("svc2", func(c Vessel) (any, error) {
+		reg("svc2", func(c Vessel) (any, error) {
 			return &testService{value: "svc2"}, nil
 		}),
 	)
-	require.NoError(t, err)
 
 	// Empty query should return all services
 	results := Query(c, ServiceQuery{})

@@ -9,6 +9,16 @@ import (
 	"github.com/xraph/go-utils/di"
 )
 
+// testService is a simple test service used across test files.
+type testService struct {
+	value string
+}
+
+func (s *testService) Name() string                        { return "test" }
+func (s *testService) Start(_ context.Context) error       { return nil }
+func (s *testService) Stop(_ context.Context) error        { return nil }
+func (s *testService) Health(_ context.Context) error      { return nil }
+
 func TestMiddleware_BeforeAfterResolve(t *testing.T) {
 	c := New().(*containerImpl)
 
@@ -29,14 +39,15 @@ func TestMiddleware_BeforeAfterResolve(t *testing.T) {
 	c.Use(mw)
 
 	// Register a simple service
-	err := RegisterSingleton(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "test"}, nil
-	})
+	}, di.Singleton())
 	assert.NoError(t, err)
 
 	// Resolve the service
-	svc, err := Resolve[*testService](c, "test")
+	raw, err := c.Resolve("test")
 	assert.NoError(t, err)
+	svc := raw.(*testService)
 	assert.NotNil(t, svc)
 
 	// Check middleware was called
@@ -57,13 +68,13 @@ func TestMiddleware_BeforeResolveError(t *testing.T) {
 	c.Use(mw)
 
 	// Register a service
-	err := RegisterSingleton(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "test"}, nil
-	})
+	}, di.Singleton())
 	assert.NoError(t, err)
 
 	// Resolve should fail due to middleware
-	_, err = Resolve[*testService](c, "test")
+	_, err = c.Resolve("test")
 	assert.ErrorIs(t, err, expectedErr)
 }
 
@@ -81,13 +92,13 @@ func TestMiddleware_AfterResolveError(t *testing.T) {
 	c.Use(mw)
 
 	// Register a service
-	err := RegisterSingleton(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "test"}, nil
-	})
+	}, di.Singleton())
 	assert.NoError(t, err)
 
 	// Resolve should fail due to middleware
-	_, err = Resolve[*testService](c, "test")
+	_, err = c.Resolve("test")
 	assert.ErrorIs(t, err, expectedErr)
 }
 
@@ -111,9 +122,9 @@ func TestMiddleware_BeforeAfterStart(t *testing.T) {
 	c.Use(mw)
 
 	// Register a service that implements di.Service
-	err := RegisterSingleton(c, "svc", func(c Vessel) (di.Service, error) {
+	err := c.Register("svc", func(c Vessel) (any, error) {
 		return &mockService{name: "svc"}, nil
-	})
+	}, di.Singleton())
 	assert.NoError(t, err)
 
 	// Resolve the service (should auto-start)
@@ -158,12 +169,12 @@ func TestMiddleware_MultipleMiddleware(t *testing.T) {
 	c.Use(mw2)
 
 	// Register and resolve a service
-	err := RegisterSingleton(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "test"}, nil
-	})
+	}, di.Singleton())
 	assert.NoError(t, err)
 
-	_, err = Resolve[*testService](c, "test")
+	_, err = c.Resolve("test")
 	assert.NoError(t, err)
 
 	// Middleware should be called in order (FIFO for before, FIFO for after)
@@ -191,13 +202,13 @@ func TestMiddleware_AfterResolveReceivesError(t *testing.T) {
 
 	// Register a service that fails
 	expectedErr := errors.New("factory failed")
-	err := RegisterSingleton(c, "failing", func(c Vessel) (*testService, error) {
+	err := c.Register("failing", func(c Vessel) (any, error) {
 		return nil, expectedErr
-	})
+	}, di.Singleton())
 	assert.NoError(t, err)
 
 	// Resolve should fail
-	_, err = Resolve[*testService](c, "failing")
+	_, err = c.Resolve("failing")
 	assert.Error(t, err)
 
 	// Middleware should have captured the error

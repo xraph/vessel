@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xraph/go-utils/di"
 )
 
 func TestScope_Has(t *testing.T) {
@@ -13,9 +14,9 @@ func TestScope_Has(t *testing.T) {
 	defer func() { _ = scopeImpl.End() }()
 
 	// Register a service
-	err := RegisterSingleton(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "test"}, nil
-	})
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	// Scope should delegate to parent container
@@ -44,14 +45,14 @@ func TestScope_Services(t *testing.T) {
 	defer func() { _ = scopeImpl.End() }()
 
 	// Register scoped services
-	err := RegisterScoped(c, "svc1", func(c Vessel) (*testService, error) {
+	err := c.Register("svc1", func(c Vessel) (any, error) {
 		return &testService{value: "svc1"}, nil
-	})
+	}, di.Scoped())
 	require.NoError(t, err)
 
-	err = RegisterScoped(c, "svc2", func(c Vessel) (*testService, error) {
+	err = c.Register("svc2", func(c Vessel) (any, error) {
 		return &testService{value: "svc2"}, nil
-	})
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	// No services resolved yet
@@ -126,110 +127,115 @@ func TestScope_SetAfterEnd(t *testing.T) {
 
 func TestResolveScope(t *testing.T) {
 	c := New()
-	scope := c.BeginScope()
-	defer func() { _ = scope.End() }()
+	s := c.BeginScope()
+	defer func() { _ = s.End() }()
 
 	// Register scoped service
-	err := RegisterScoped(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "hello"}, nil
-	})
+	}, di.Scoped())
 	require.NoError(t, err)
 
-	// Resolve with type safety
-	svc, err := ResolveScope[*testService](scope, "test")
+	// Resolve with type assertion
+	raw, err := s.Resolve("test")
 	require.NoError(t, err)
+	svc := raw.(*testService)
 	assert.Equal(t, "hello", svc.value)
 }
 
 func TestMustScope(t *testing.T) {
 	c := New()
-	scope := c.BeginScope()
-	defer func() { _ = scope.End() }()
+	s := c.BeginScope()
+	defer func() { _ = s.End() }()
 
 	// Register scoped service
-	err := RegisterScoped(c, "test", func(c Vessel) (*testService, error) {
+	err := c.Register("test", func(c Vessel) (any, error) {
 		return &testService{value: "hello"}, nil
-	})
+	}, di.Scoped())
 	require.NoError(t, err)
 
-	// MustScope should not panic
-	svc := MustScope[*testService](scope, "test")
+	// Resolve should not panic
+	raw, err := s.Resolve("test")
+	require.NoError(t, err)
+	svc := raw.(*testService)
 	assert.Equal(t, "hello", svc.value)
 }
 
 func TestMustScopePanics(t *testing.T) {
 	c := New()
-	scope := c.BeginScope()
-	defer func() { _ = scope.End() }()
+	s := c.BeginScope()
+	defer func() { _ = s.End() }()
 
 	// Don't register the service
 
-	// MustScope should panic
-	assert.Panics(t, func() {
-		MustScope[*testService](scope, "test")
-	})
+	// Resolve should fail
+	_, err := s.Resolve("test")
+	assert.Error(t, err)
 }
 
 func TestSetScoped_GetScoped(t *testing.T) {
 	c := New()
-	scope := c.BeginScope()
-	defer func() { _ = scope.End() }()
+	scopeImpl := c.BeginScope().(*scope)
+	defer func() { _ = scopeImpl.End() }()
 
 	// Set typed values
-	SetScoped(scope, "string", "hello")
-	SetScoped(scope, "int", 42)
-	SetScoped(scope, "struct", &testService{value: "world"})
+	scopeImpl.Set("string", "hello")
+	scopeImpl.Set("int", 42)
+	scopeImpl.Set("struct", &testService{value: "world"})
 
 	// Get typed values
-	str, ok := GetScoped[string](scope, "string")
+	str, ok := scopeImpl.Get("string")
 	assert.True(t, ok)
 	assert.Equal(t, "hello", str)
 
-	num, ok := GetScoped[int](scope, "int")
+	num, ok := scopeImpl.Get("int")
 	assert.True(t, ok)
 	assert.Equal(t, 42, num)
 
-	svc, ok := GetScoped[*testService](scope, "struct")
+	svcRaw, ok := scopeImpl.Get("struct")
 	assert.True(t, ok)
+	svc := svcRaw.(*testService)
 	assert.Equal(t, "world", svc.value)
 
 	// Get nonexistent key
-	_, ok = GetScoped[string](scope, "nonexistent")
+	_, ok = scopeImpl.Get("nonexistent")
 	assert.False(t, ok)
 }
 
 func TestGetScoped_TypeMismatch(t *testing.T) {
 	c := New()
-	scope := c.BeginScope()
-	defer func() { _ = scope.End() }()
+	scopeImpl := c.BeginScope().(*scope)
+	defer func() { _ = scopeImpl.End() }()
 
 	// Set a string value
-	SetScoped(scope, "key", "hello")
+	scopeImpl.Set("key", "hello")
 
-	// Try to get as int (type mismatch)
-	_, ok := GetScoped[int](scope, "key")
-	assert.False(t, ok)
+	// Try to get - value is there but is a string, not int
+	val, ok := scopeImpl.Get("key")
+	assert.True(t, ok)
+	_, isInt := val.(int)
+	assert.False(t, isInt)
 }
 
 func TestScope_ContextIsolation(t *testing.T) {
 	c := New()
 
 	// Create two scopes
-	scope1 := c.BeginScope()
-	scope2 := c.BeginScope()
+	scope1 := c.BeginScope().(*scope)
+	scope2 := c.BeginScope().(*scope)
 	defer func() { _ = scope1.End() }()
 	defer func() { _ = scope2.End() }()
 
 	// Set values in each scope
-	SetScoped(scope1, "key", "scope1")
-	SetScoped(scope2, "key", "scope2")
+	scope1.Set("key", "scope1")
+	scope2.Set("key", "scope2")
 
 	// Values should be isolated
-	val1, ok1 := GetScoped[string](scope1, "key")
+	val1, ok1 := scope1.Get("key")
 	assert.True(t, ok1)
 	assert.Equal(t, "scope1", val1)
 
-	val2, ok2 := GetScoped[string](scope2, "key")
+	val2, ok2 := scope2.Get("key")
 	assert.True(t, ok2)
 	assert.Equal(t, "scope2", val2)
 }

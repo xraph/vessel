@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xraph/go-utils/di"
 )
 
 // Custom disposable that returns error.
@@ -24,7 +25,7 @@ func TestScope_End_DisposeError(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return &errorDisposable{name: "test", err: disposeErr}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -47,12 +48,12 @@ func TestScope_End_MultipleDisposeErrors(t *testing.T) {
 
 	err := c.Register("test1", func(c Vessel) (any, error) {
 		return &errorDisposable{name: "test1", err: err1}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	err = c.Register("test2", func(c Vessel) (any, error) {
 		return &errorDisposable{name: "test2", err: err2}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -79,7 +80,7 @@ func TestResolve_Singleton_RaceCondition(t *testing.T) {
 		err := c.Register("test", func(c Vessel) (any, error) {
 			// Small delay to increase chance of race
 			return &mockService{name: "test"}, nil
-		}, Singleton())
+		}, di.Singleton())
 		require.NoError(t, err)
 
 		// Resolve many times concurrently

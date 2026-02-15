@@ -17,6 +17,14 @@ type Factory = di.Factory
 // ServiceInfo contains diagnostic information.
 type ServiceInfo = di.ServiceInfo
 
+// RegisterOption is a configuration option for service registration.
+type RegisterOption = di.RegisterOption
+
+// mergeOptions combines multiple options.
+func mergeOptions(opts []RegisterOption) RegisterOption {
+	return di.MergeOptions(opts)
+}
+
 // New creates a new DI container.
 func New() Vessel {
 	return newContainerImpl()

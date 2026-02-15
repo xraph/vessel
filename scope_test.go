@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xraph/go-utils/di"
 )
 
 func TestScope_ResolveSingleton(t *testing.T) {
@@ -13,7 +14,7 @@ func TestScope_ResolveSingleton(t *testing.T) {
 
 	err := c.Register("singleton", func(c Vessel) (any, error) {
 		return &mockService{name: "singleton"}, nil
-	}, Singleton())
+	}, di.Singleton())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -38,7 +39,7 @@ func TestScope_ResolveScoped(t *testing.T) {
 		callCount++
 
 		return &mockService{name: "scoped"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -65,7 +66,7 @@ func TestScope_ResolveScoped_DifferentScopes(t *testing.T) {
 		callCount++
 
 		return &mockService{name: "scoped"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	// First scope
@@ -92,7 +93,7 @@ func TestScope_ResolveTransient(t *testing.T) {
 		callCount++
 
 		return &mockService{name: "transient"}, nil
-	}, Transient())
+	}, di.Transient())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -125,7 +126,7 @@ func TestScope_ResolveAfterEnd(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return "value", nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -143,7 +144,7 @@ func TestScope_EndWithDisposable(t *testing.T) {
 
 	err := c.Register("test", func(c Vessel) (any, error) {
 		return svc, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
@@ -184,7 +185,7 @@ func TestScope_ConcurrentResolve(t *testing.T) {
 		mu.Unlock()
 
 		return &mockService{name: "scoped"}, nil
-	}, Scoped())
+	}, di.Scoped())
 	require.NoError(t, err)
 
 	scope := c.BeginScope()
