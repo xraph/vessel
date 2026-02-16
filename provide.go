@@ -289,12 +289,19 @@ func Provide(c Vessel, constructor any, opts ...ConstructorOption) error {
 	return nil
 }
 
+// Deprecated: Use Provide instead.
 func ProvideConstructor(c Vessel, constructor any, opts ...ConstructorOption) error {
 	return Provide(c, constructor, opts...)
 }
 
+// Deprecated: Use Inject instead.
 func InjectType[T any](c Vessel) (T, error) {
 	return Inject[T](c)
+}
+
+// Deprecated: Use MustInject instead.
+func MustInjectType[T any](c Vessel) T {
+	return MustInject[T](c)
 }
 
 // ProvideNamed registers a named constructor function with automatic dependency resolution.
@@ -306,6 +313,87 @@ func InjectType[T any](c Vessel) (T, error) {
 //	ProvideNamed(c, "replica", NewReplicaDB)
 func ProvideNamed(c Vessel, name string, constructor any, opts ...ConstructorOption) error {
 	return Provide(c, constructor, append([]ConstructorOption{WithName(name)}, opts...)...)
+}
+
+// ProvideValue registers a pre-built instance as a singleton service.
+// The instance is registered by its type and can be resolved with Inject[T].
+//
+// Example:
+//
+//	cfg := &Config{Port: 8080}
+//	ProvideValue(c, cfg)
+//
+//	// Later:
+//	config, _ := Inject[*Config](c)
+func ProvideValue[T any](c Vessel, value T, opts ...ConstructorOption) error {
+	t := reflect.TypeFor[T]()
+
+	// Apply options
+	config := &constructorConfig{
+		lifecycle: "singleton",
+	}
+	for _, opt := range opts {
+		opt.applyConstructor(config)
+	}
+
+	impl, ok := c.(*containerImpl)
+	if !ok {
+		return fmt.Errorf("ProvideValue requires *containerImpl, got %T", c)
+	}
+
+	if impl.typeRegistry == nil {
+		impl.typeRegistry = newTypeRegistry()
+	}
+
+	key := typeKey{typ: t, name: config.name}
+
+	reg := &typeRegistration{
+		key:       key,
+		factory:   func(_ Vessel) (any, error) { return value, nil },
+		instance:  value,
+		lifecycle: "singleton",
+		groups:    []string{},
+	}
+
+	if config.group != "" {
+		reg.groups = append(reg.groups, config.group)
+	}
+
+	if err := impl.typeRegistry.register(key, reg); err != nil {
+		return err
+	}
+
+	// Register aliases
+	for _, alias := range config.aliases {
+		aliasKey := typeKey{typ: t, name: alias}
+		if err := impl.typeRegistry.register(aliasKey, reg); err != nil {
+			return fmt.Errorf("failed to register alias %q: %w", alias, err)
+		}
+	}
+
+	// Register as additional interface types
+	for _, asType := range config.asTypes {
+		asKey := typeKey{typ: asType, name: config.name}
+		asReg := &typeRegistration{
+			key:       asKey,
+			factory:   func(_ Vessel) (any, error) { return value, nil },
+			instance:  value,
+			lifecycle: "singleton",
+			groups:    reg.groups,
+		}
+		if err := impl.typeRegistry.register(asKey, asReg); err != nil {
+			return err
+		}
+
+		for _, alias := range config.aliases {
+			aliasAsKey := typeKey{typ: asType, name: alias}
+			if err := impl.typeRegistry.register(aliasAsKey, asReg); err != nil {
+				return fmt.Errorf("failed to register alias %q for type %s: %w", alias, asType, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // createAutoResolveFactory creates a factory that automatically resolves
