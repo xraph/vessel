@@ -3,7 +3,26 @@ package vessel
 import (
 	"fmt"
 	"reflect"
+
+	"github.com/xraph/go-utils/di"
 )
+
+// healthCheckerType is the reflect.Type for di.HealthChecker, used to check
+// whether registered types implement health checking at registration time.
+// healthCheckerType is the reflect.Type for di.HealthChecker.
+var healthCheckerType = reflect.TypeOf((*di.HealthChecker)(nil)).Elem()
+
+// isTypeHealthCapable checks if a reflect.Type implements di.HealthChecker.
+func isTypeHealthCapable(t reflect.Type) bool {
+	if t.Implements(healthCheckerType) {
+		return true
+	}
+	if t.Kind() == reflect.Ptr {
+		return t.Elem().Implements(healthCheckerType)
+	}
+	// Check pointer-to-type as well (methods may be on *T)
+	return reflect.PointerTo(t).Implements(healthCheckerType)
+}
 
 // ConstructorOption configures how a constructor is registered
 type ConstructorOption interface {
@@ -223,12 +242,16 @@ func Provide(c Vessel, constructor any, opts ...ConstructorOption) error {
 			resultFactory = createMultiResultFactory(factory, result.fieldName, result.typ)
 		}
 
+		// Check if the return type implements di.HealthChecker
+		isHealthCapable := isTypeHealthCapable(result.typ)
+
 		reg := &typeRegistration{
-			key:         key,
-			constructor: info,
-			factory:     resultFactory,
-			lifecycle:   config.lifecycle,
-			groups:      groups,
+			key:           key,
+			constructor:   info,
+			factory:       resultFactory,
+			lifecycle:     config.lifecycle,
+			groups:        groups,
+			healthCapable: isHealthCapable,
 		}
 
 		if err := impl.typeRegistry.register(key, reg); err != nil {
@@ -239,11 +262,12 @@ func Provide(c Vessel, constructor any, opts ...ConstructorOption) error {
 		for _, asType := range config.asTypes {
 			asKey := typeKey{typ: asType, name: name}
 			asReg := &typeRegistration{
-				key:         asKey,
-				constructor: info,
-				factory:     resultFactory,
-				lifecycle:   config.lifecycle,
-				groups:      groups,
+				key:           asKey,
+				constructor:   info,
+				factory:       resultFactory,
+				lifecycle:     config.lifecycle,
+				groups:        groups,
+				healthCapable: isHealthCapable,
 			}
 			if err := impl.typeRegistry.register(asKey, asReg); err != nil {
 				return err
@@ -347,12 +371,16 @@ func ProvideValue[T any](c Vessel, value T, opts ...ConstructorOption) error {
 
 	key := typeKey{typ: t, name: config.name}
 
+	// Check health capability via runtime type assertion on the value
+	_, isHealthCapable := any(value).(di.HealthChecker)
+
 	reg := &typeRegistration{
-		key:       key,
-		factory:   func(_ Vessel) (any, error) { return value, nil },
-		instance:  value,
-		lifecycle: "singleton",
-		groups:    []string{},
+		key:           key,
+		factory:       func(_ Vessel) (any, error) { return value, nil },
+		instance:      value,
+		lifecycle:     "singleton",
+		groups:        []string{},
+		healthCapable: isHealthCapable,
 	}
 
 	if config.group != "" {
@@ -375,11 +403,12 @@ func ProvideValue[T any](c Vessel, value T, opts ...ConstructorOption) error {
 	for _, asType := range config.asTypes {
 		asKey := typeKey{typ: asType, name: config.name}
 		asReg := &typeRegistration{
-			key:       asKey,
-			factory:   func(_ Vessel) (any, error) { return value, nil },
-			instance:  value,
-			lifecycle: "singleton",
-			groups:    reg.groups,
+			key:           asKey,
+			factory:       func(_ Vessel) (any, error) { return value, nil },
+			instance:      value,
+			lifecycle:     "singleton",
+			groups:        reg.groups,
+			healthCapable: isHealthCapable,
 		}
 		if err := impl.typeRegistry.register(asKey, asReg); err != nil {
 			return err

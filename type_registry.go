@@ -1,9 +1,12 @@
 package vessel
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
+
+	"github.com/xraph/go-utils/di"
 )
 
 // typeKey uniquely identifies a service by its type and optional name.
@@ -28,14 +31,16 @@ func (k typeKey) String() string {
 
 // typeRegistration holds a type-based service registration
 type typeRegistration struct {
-	key          typeKey
-	constructor  *constructorInfo
-	factory      Factory
-	instance     any
-	lifecycle    string // "singleton", "transient", "scoped"
-	groups       []string
-	constructing bool // Prevent circular instantiation
-	mu           sync.RWMutex
+	key           typeKey
+	constructor   *constructorInfo
+	factory       Factory
+	instance      any
+	lifecycle     string // "singleton", "transient", "scoped"
+	groups        []string
+	constructing  bool // Prevent circular instantiation
+	healthCapable bool // true if return type implements di.HealthChecker
+	started       bool // tracks lifecycle state for Start/Stop
+	mu            sync.RWMutex
 }
 
 // typeRegistry manages type-based service registrations alongside the
@@ -96,6 +101,81 @@ func (r *typeRegistry) getGroup(group string) []*typeRegistration {
 	return r.groups[group]
 }
 
+// deriveServiceName returns a display name for a type-registry entry.
+// Named services use their name. Unnamed services derive from the type
+// using the pattern "{pkgPath}.{TypeName}".
+func deriveServiceName(key typeKey) string {
+	if key.name != "" {
+		return key.name
+	}
+	t := key.typ
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	pkg := t.PkgPath()
+	if pkg != "" {
+		return pkg + "." + t.Name()
+	}
+	return t.String()
+}
+
+// names returns unique service names from the type registry.
+// Named services use their name, unnamed services use the derived name.
+// Duplicate registrations (aliases pointing to the same registration) are deduplicated.
+func (r *typeRegistry) names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	seen := make(map[*typeRegistration]bool)
+	nameSet := make(map[string]bool)
+
+	for key, reg := range r.services {
+		if seen[reg] {
+			continue
+		}
+		seen[reg] = true
+		nameSet[deriveServiceName(key)] = true
+	}
+
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		names = append(names, name)
+	}
+
+	return names
+}
+
+// healthCapableNames returns unique service names for registrations that
+// implement di.HealthChecker. Only these are considered "services" for
+// dashboard and inspection purposes.
+func (r *typeRegistry) healthCapableNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	seen := make(map[*typeRegistration]bool)
+	nameSet := make(map[string]bool)
+
+	for key, reg := range r.services {
+		if seen[reg] {
+			continue
+		}
+		seen[reg] = true
+
+		if !reg.healthCapable {
+			continue
+		}
+
+		nameSet[deriveServiceName(key)] = true
+	}
+
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		names = append(names, name)
+	}
+
+	return names
+}
+
 // resolve resolves a service by type key, instantiating if necessary
 func (r *typeRegistry) resolve(key typeKey, container Vessel) (any, error) {
 	reg, ok := r.get(key)
@@ -143,7 +223,22 @@ func (reg *typeRegistration) resolve(container Vessel) (any, error) {
 	if reg.lifecycle == "singleton" {
 		reg.instance = instance
 	}
+
+	// Check if we need to auto-start
+	needStart := !reg.started
 	reg.mu.Unlock()
+
+	// Auto-start if service implements di.Starter and not yet started
+	if needStart {
+		if starter, ok := instance.(di.Starter); ok {
+			if err := starter.Start(context.Background()); err != nil {
+				return nil, fmt.Errorf("auto-start %s: %w", reg.key, err)
+			}
+			reg.mu.Lock()
+			reg.started = true
+			reg.mu.Unlock()
+		}
+	}
 
 	return instance, nil
 }
