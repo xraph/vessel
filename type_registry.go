@@ -119,32 +119,6 @@ func deriveServiceName(key typeKey) string {
 	return t.String()
 }
 
-// names returns unique service names from the type registry.
-// Named services use their name, unnamed services use the derived name.
-// Duplicate registrations (aliases pointing to the same registration) are deduplicated.
-func (r *typeRegistry) names() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	seen := make(map[*typeRegistration]bool)
-	nameSet := make(map[string]bool)
-
-	for key, reg := range r.services {
-		if seen[reg] {
-			continue
-		}
-		seen[reg] = true
-		nameSet[deriveServiceName(key)] = true
-	}
-
-	names := make([]string, 0, len(nameSet))
-	for name := range nameSet {
-		names = append(names, name)
-	}
-
-	return names
-}
-
 // healthCapableNames returns unique service names for registrations that
 // implement di.HealthChecker. Only these are considered "services" for
 // dashboard and inspection purposes.
