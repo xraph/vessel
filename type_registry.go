@@ -126,20 +126,32 @@ func (r *typeRegistry) healthCapableNames() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	seen := make(map[*typeRegistration]bool)
-	nameSet := make(map[string]bool)
+	// For each unique registration, collect all keys so we can
+	// deterministically pick the unnamed (type-derived) key over
+	// any named alias. Without this, Go's random map iteration
+	// would cause Services() to return different names on each call.
+	regKeys := make(map[*typeRegistration][]typeKey)
 
 	for key, reg := range r.services {
-		if seen[reg] {
-			continue
-		}
-		seen[reg] = true
-
 		if !reg.healthCapable {
 			continue
 		}
+		regKeys[reg] = append(regKeys[reg], key)
+	}
 
-		nameSet[deriveServiceName(key)] = true
+	nameSet := make(map[string]bool, len(regKeys))
+
+	for _, keys := range regKeys {
+		// Prefer the unnamed key (type-derived name) for determinism.
+		// Fall back to the first named key if no unnamed key exists.
+		best := keys[0]
+		for _, k := range keys {
+			if k.name == "" {
+				best = k
+				break
+			}
+		}
+		nameSet[deriveServiceName(best)] = true
 	}
 
 	names := make([]string, 0, len(nameSet))
