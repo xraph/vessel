@@ -17,7 +17,7 @@ func isTypeHealthCapable(t reflect.Type) bool {
 	if t.Implements(healthCheckerType) {
 		return true
 	}
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		return t.Elem().Implements(healthCheckerType)
 	}
 	// Check pointer-to-type as well (methods may be on *T)
@@ -106,7 +106,7 @@ func As(ifaces ...any) ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
 		for _, iface := range ifaces {
 			t := reflect.TypeOf(iface)
-			if t.Kind() == reflect.Ptr {
+			if t.Kind() == reflect.Pointer {
 				t = t.Elem()
 			}
 			c.asTypes = append(c.asTypes, t)
@@ -475,7 +475,7 @@ func createAutoResolveFactory(info *constructorInfo, impl *containerImpl) Factor
 // resolveInStruct creates and populates an In struct with resolved dependencies
 func resolveInStruct(param paramInfo, impl *containerImpl) (reflect.Value, error) {
 	structType := param.typ
-	isPtr := structType.Kind() == reflect.Ptr
+	isPtr := structType.Kind() == reflect.Pointer
 	if isPtr {
 		structType = structType.Elem()
 	}
@@ -577,7 +577,7 @@ func createMultiResultFactory(baseFactory Factory, fieldName string, resultType 
 
 		// Extract the specific field from Out struct by name
 		resultValue := reflect.ValueOf(result)
-		if resultValue.Kind() == reflect.Ptr {
+		if resultValue.Kind() == reflect.Pointer {
 			resultValue = resultValue.Elem()
 		}
 
