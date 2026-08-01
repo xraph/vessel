@@ -171,7 +171,7 @@ func analyzeResult(t reflect.Type, index int) (resultInfo, error) {
 // isInStruct checks if a type embeds vessel.In
 func isInStruct(t reflect.Type) bool {
 	// Handle pointer types
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -195,7 +195,7 @@ func isInStruct(t reflect.Type) bool {
 // isOutStruct checks if a type embeds vessel.Out
 func isOutStruct(t reflect.Type) bool {
 	// Handle pointer types
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -218,7 +218,7 @@ func isOutStruct(t reflect.Type) bool {
 
 // expandInStruct expands an In struct into its field dependencies
 func expandInStruct(t reflect.Type) ([]paramInfo, error) {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -268,7 +268,7 @@ func expandInStruct(t reflect.Type) ([]paramInfo, error) {
 
 // expandOutStruct expands an Out struct into its result fields
 func expandOutStruct(t reflect.Type) ([]resultInfo, error) {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 

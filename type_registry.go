@@ -109,7 +109,7 @@ func deriveServiceName(key typeKey) string {
 		return key.name
 	}
 	t := key.typ
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	pkg := t.PkgPath()
