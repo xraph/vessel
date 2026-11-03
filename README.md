@@ -2,6 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/xraph/vessel.svg)](https://pkg.go.dev/github.com/xraph/vessel)
 [![Go Report Card](https://goreportcard.com/badge/github.com/xraph/vessel)](https://goreportcard.com/report/github.com/xraph/vessel)
+[![codecov](https://codecov.io/gh/xraph/vessel/branch/main/graph/badge.svg)](https://app.codecov.io/gh/xraph/vessel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Vessel** is a powerful, type-safe dependency injection container for Go, built as part of the Forge framework. It provides elegant service lifecycle management, flexible dependency resolution, and comprehensive testing support.
