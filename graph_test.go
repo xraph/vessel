@@ -120,17 +120,27 @@ func TestDependencyGraph_TopologicalSort_MixedDependenciesAndOrder(t *testing.T)
 	assert.Less(t, ind1Idx, ind2Idx, "independent1 registered before independent2, should maintain order")
 }
 
-func TestDependencyGraph_Visit_AlreadyVisited(t *testing.T) {
+func TestDependencyGraph_SharedDependencyListedOnce(t *testing.T) {
 	g := NewDependencyGraph()
-	g.AddNode("a", nil)
+	g.AddNode("base", nil)
+	g.AddNode("a", []string{"base"})
+	g.AddNode("b", []string{"base"})
 
-	visited := map[string]bool{"a": true}
-	visiting := make(map[string]bool)
-	result := []string{}
-
-	err := g.visit("a", visited, visiting, &result)
+	result, err := g.TopologicalSort()
 	assert.NoError(t, err)
-	assert.Empty(t, result) // Should not add again
+	assert.Equal(t, []string{"base", "a", "b"}, result)
+}
+
+func TestDependencyGraph_CycleErrorNamesFullPath(t *testing.T) {
+	g := NewDependencyGraph()
+	g.AddNode("root", []string{"a"})
+	g.AddNode("a", []string{"b"})
+	g.AddNode("b", []string{"c"})
+	g.AddNode("c", []string{"a"})
+
+	_, err := g.TopologicalSort()
+	assert.ErrorIs(t, err, ErrCircularDependencySentinel)
+	assert.Contains(t, err.Error(), "a -> b -> c -> a")
 }
 
 // Helper function.

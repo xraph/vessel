@@ -135,11 +135,11 @@ func TestResolveGroup(t *testing.T) {
 	t.Run("no registry", func(t *testing.T) {
 		c.typeRegistry = nil
 
-		_, err := resolveGroup(param, c)
+		_, err := resolveGroup(param, c, resolveCtx{})
 		require.Error(t, err)
 
 		param.optional = true
-		got, err := resolveGroup(param, c)
+		got, err := resolveGroup(param, c, resolveCtx{})
 		require.NoError(t, err)
 		assert.Nil(t, got)
 
@@ -149,11 +149,11 @@ func TestResolveGroup(t *testing.T) {
 	t.Run("empty group", func(t *testing.T) {
 		c.typeRegistry = newTypeRegistry()
 
-		_, err := resolveGroup(param, c)
+		_, err := resolveGroup(param, c, resolveCtx{})
 		require.Error(t, err)
 
 		param.optional = true
-		got, err := resolveGroup(param, c)
+		got, err := resolveGroup(param, c, resolveCtx{})
 		require.NoError(t, err)
 		assert.Nil(t, got)
 
@@ -164,7 +164,7 @@ func TestResolveGroup(t *testing.T) {
 		c.typeRegistry = nil
 		require.NoError(t, Provide(c, newGapA, AsGroup("handlers")))
 
-		got, err := resolveGroup(param, c)
+		got, err := resolveGroup(param, c, resolveCtx{})
 		require.NoError(t, err)
 		assert.Len(t, got.([]gapHandler), 1)
 	})

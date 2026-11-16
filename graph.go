@@ -14,35 +14,38 @@ type node struct {
 	name         string
 	dependencies []string // Backward compatible: just names
 	deps         []di.Dep // New: full dependency specs with modes
+	eager        []string // names of non-lazy deps, computed once
+}
+
+func newNode(name string, dependencies []string, deps []di.Dep) *node {
+	n := &node{name: name, dependencies: dependencies, deps: deps}
+	for _, dep := range deps {
+		if !dep.Mode.IsLazy() {
+			n.eager = append(n.eager, dep.Name)
+		}
+	}
+
+	return n
 }
 
 // NewDependencyGraph creates a new dependency graph.
 func NewDependencyGraph() *DependencyGraph {
 	return &DependencyGraph{
 		nodes: make(map[string]*node),
-		order: make([]string, 0),
 	}
 }
 
 // AddNode adds a node with its dependencies (string-based, backward compatible).
 // Nodes are processed in the order they are added (FIFO) when no dependencies exist.
 func (g *DependencyGraph) AddNode(name string, dependencies []string) {
-	g.nodes[name] = &node{
-		name:         name,
-		dependencies: dependencies,
-		deps:         di.DepsFromNames(dependencies), // Convert to Dep specs
-	}
+	g.nodes[name] = newNode(name, dependencies, di.DepsFromNames(dependencies))
 	g.order = append(g.order, name)
 }
 
 // AddNodeWithDeps adds a node with full Dep specs.
 // This is the new API that supports lazy/optional dependencies.
 func (g *DependencyGraph) AddNodeWithDeps(name string, deps []di.Dep) {
-	g.nodes[name] = &node{
-		name:         name,
-		dependencies: di.DepNames(deps), // Keep string names for backward compat
-		deps:         deps,
-	}
+	g.nodes[name] = newNode(name, di.DepNames(deps), deps)
 	g.order = append(g.order, name)
 }
 
@@ -68,15 +71,7 @@ func (g *DependencyGraph) GetDeps(name string) []di.Dep {
 // These are the ones that must be resolved before the service can be created.
 func (g *DependencyGraph) GetEagerDependencies(name string) []string {
 	if node, ok := g.nodes[name]; ok {
-		var eager []string
-
-		for _, dep := range node.deps {
-			if !dep.Mode.IsLazy() {
-				eager = append(eager, dep.Name)
-			}
-		}
-
-		return eager
+		return node.eager
 	}
 
 	return nil
@@ -93,103 +88,68 @@ func (g *DependencyGraph) HasNode(name string) bool {
 // Nodes without dependencies maintain their registration order (FIFO).
 // Returns error if circular dependency detected.
 func (g *DependencyGraph) TopologicalSort() ([]string, error) {
-	// Track visited nodes
-	visited := make(map[string]bool)
-	visiting := make(map[string]bool)
-	result := make([]string, 0, len(g.nodes))
-
-	// Visit nodes in registration order to preserve FIFO for nodes without dependencies
-	for _, name := range g.order {
-		if err := g.visit(name, visited, visiting, &result); err != nil {
-			return nil, err
-		}
-	}
-
-	return result, nil
+	return g.sort(func(n *node) []string { return n.dependencies })
 }
 
 // TopologicalSortEagerOnly returns nodes sorted considering only eager dependencies.
-// Lazy dependencies are excluded from the ordering since they're resolved on-demand.
+// Lazy dependencies are excluded from the ordering since they're resolved on-demand,
+// which is what lets a lazy dependency break a cycle.
 func (g *DependencyGraph) TopologicalSortEagerOnly() ([]string, error) {
-	visited := make(map[string]bool)
-	visiting := make(map[string]bool)
+	return g.sort(func(n *node) []string { return n.eager })
+}
+
+// sort runs a depth-first topological sort using edges to list each node's
+// dependencies. A cycle is reported with its full path, e.g. a -> b -> a.
+func (g *DependencyGraph) sort(edges func(*node) []string) ([]string, error) {
+	visited := make(map[string]bool, len(g.nodes))
 	result := make([]string, 0, len(g.nodes))
 
+	var stack []string
+
+	onStack := make(map[string]int) // name -> index in stack
+
+	var visit func(name string) error
+	visit = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+
+		if i, ok := onStack[name]; ok {
+			cycle := append(append([]string{}, stack[i:]...), name)
+
+			return ErrCircularDependency(cycle)
+		}
+
+		n := g.nodes[name]
+		if n == nil {
+			// Not registered: optional, or reported when it's resolved.
+			return nil
+		}
+
+		onStack[name] = len(stack)
+		stack = append(stack, name)
+
+		for _, dep := range edges(n) {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+
+		stack = stack[:len(stack)-1]
+		delete(onStack, name)
+
+		visited[name] = true
+		result = append(result, name)
+
+		return nil
+	}
+
+	// Visit nodes in registration order to preserve FIFO for nodes without dependencies
 	for _, name := range g.order {
-		if err := g.visitEagerOnly(name, visited, visiting, &result); err != nil {
+		if err := visit(name); err != nil {
 			return nil, err
 		}
 	}
 
 	return result, nil
-}
-
-// visit performs DFS traversal.
-func (g *DependencyGraph) visit(name string, visited, visiting map[string]bool, result *[]string) error {
-	if visited[name] {
-		return nil
-	}
-
-	if visiting[name] {
-		// Build the cycle chain for better error message
-		cycle := []string{name}
-
-		return ErrCircularDependency(cycle)
-	}
-
-	node := g.nodes[name]
-	if node == nil {
-		// Node not in graph, skip (may be optional dependency)
-		return nil
-	}
-
-	visiting[name] = true
-
-	// Visit dependencies first
-	for _, dep := range node.dependencies {
-		if err := g.visit(dep, visited, visiting, result); err != nil {
-			return err
-		}
-	}
-
-	visiting[name] = false
-	visited[name] = true
-	*result = append(*result, name)
-
-	return nil
-}
-
-// visitEagerOnly performs DFS traversal considering only eager dependencies.
-func (g *DependencyGraph) visitEagerOnly(name string, visited, visiting map[string]bool, result *[]string) error {
-	if visited[name] {
-		return nil
-	}
-
-	if visiting[name] {
-		cycle := []string{name}
-
-		return ErrCircularDependency(cycle)
-	}
-
-	node := g.nodes[name]
-	if node == nil {
-		return nil
-	}
-
-	visiting[name] = true
-
-	// Visit only eager (non-lazy) dependencies
-	for _, dep := range node.deps {
-		if !dep.Mode.IsLazy() {
-			if err := g.visitEagerOnly(dep.Name, visited, visiting, result); err != nil {
-				return err
-			}
-		}
-	}
-
-	visiting[name] = false
-	visited[name] = true
-	*result = append(*result, name)
-
-	return nil
 }

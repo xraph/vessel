@@ -2,6 +2,7 @@ package vessel
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/xraph/go-utils/errs"
 )
@@ -88,7 +89,7 @@ func NewServiceError(serviceName, operation string, cause error) *errs.Error {
 func ErrCircularDependency(cycle []string) *errs.Error {
 	return errs.NewError(
 		CodeCircularDependency,
-		fmt.Sprintf("circular dependency detected: %v", cycle),
+		fmt.Sprintf("circular dependency detected: %s", strings.Join(cycle, " -> ")),
 		nil,
 	).WithContext("cycle", cycle).(*errs.Error)
 }

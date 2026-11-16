@@ -105,12 +105,15 @@ func TestStop_WithError(t *testing.T) {
 	assert.ErrorIs(t, err, expectedErr)
 }
 
-func TestStop_CircularDependencyError(t *testing.T) {
+func TestStop_IgnoresDeclaredGraph(t *testing.T) {
 	c := New()
 
-	// Register services with circular dependency
+	// A cycle in the declared dependencies makes Start fail, but Stop works
+	// from the order services actually started in, so it still stops
+	// services that were auto-started by Resolve.
+	a := &mockService{name: "a"}
 	err := c.Register("a", func(c Vessel) (any, error) {
-		return &mockService{name: "a"}, nil
+		return a, nil
 	}, di.WithDependencies("b"))
 	require.NoError(t, err)
 
@@ -119,15 +122,14 @@ func TestStop_CircularDependencyError(t *testing.T) {
 	}, di.WithDependencies("a"))
 	require.NoError(t, err)
 
-	// Manually mark as started to test Stop path
-	cont := c.(*containerImpl)
-	cont.started = true
+	_, err = c.Resolve("a")
+	require.NoError(t, err)
+	require.True(t, a.started)
 
-	// Stop should fail with circular dependency error
 	ctx := context.Background()
-	err = c.Stop(ctx)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrCircularDependencySentinel)
+	assert.NoError(t, c.Stop(ctx))
+	assert.True(t, a.stopped)
+	assert.False(t, c.IsStarted("a"))
 }
 
 func TestStartService_NonService(t *testing.T) {

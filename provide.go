@@ -1,15 +1,16 @@
 package vessel
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 
 	"github.com/xraph/go-utils/di"
+	"github.com/xraph/go-utils/errs"
 )
 
 // healthCheckerType is the reflect.Type for di.HealthChecker, used to check
 // whether registered types implement health checking at registration time.
-// healthCheckerType is the reflect.Type for di.HealthChecker.
 var healthCheckerType = reflect.TypeOf((*di.HealthChecker)(nil)).Elem()
 
 // isTypeHealthCapable checks if a reflect.Type implements di.HealthChecker.
@@ -117,21 +118,23 @@ func As(ifaces ...any) ConstructorOption {
 // AsSingleton makes the constructor result a singleton (default).
 func AsSingleton() ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
-		c.lifecycle = "singleton"
+		c.lifecycle = lifecycleSingleton
 	})
 }
 
 // AsTransient makes the constructor create a new instance on each resolve.
 func AsTransient() ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
-		c.lifecycle = "transient"
+		c.lifecycle = lifecycleTransient
 	})
 }
 
 // AsScoped makes the constructor result scoped to request lifetime.
+// Scoped services are resolved with InjectScoped, or with Inject from inside
+// a factory or constructor that is itself running in a scope.
 func AsScoped() ConstructorOption {
 	return constructorOptionFunc(func(c *constructorConfig) {
-		c.lifecycle = "scoped"
+		c.lifecycle = lifecycleScoped
 	})
 }
 
@@ -154,6 +157,31 @@ func WithEager() ConstructorOption {
 	})
 }
 
+// newConstructorConfig applies opts over the defaults.
+func newConstructorConfig(opts []ConstructorOption) *constructorConfig {
+	config := &constructorConfig{lifecycle: lifecycleSingleton} // Default to singleton like dig
+	for _, opt := range opts {
+		opt.applyConstructor(config)
+	}
+
+	return config
+}
+
+// containerFor returns the concrete container behind c, making sure it has
+// a type registry.
+func containerFor(c Vessel, op string) (*containerImpl, resolveCtx, error) {
+	impl, rc, ok := unwrapContainer(c)
+	if !ok {
+		return nil, rc, fmt.Errorf("%s requires a container created by vessel.New, got %T", op, c)
+	}
+
+	if impl.typeRegistry == nil {
+		impl.typeRegistry = newTypeRegistry()
+	}
+
+	return impl, rc, nil
+}
+
 // Provide registers a constructor function with automatic dependency resolution.
 // Dependencies are inferred from function parameters and all return types (except error)
 // are registered as services.
@@ -162,6 +190,10 @@ func WithEager() ConstructorOption {
 //   - Function parameters become dependencies (resolved by type)
 //   - Return types become provided services
 //   - Error return type is handled for construction failures
+//
+// A constructor with several results, or one returning an Out struct, is
+// called once and every result shares that call. Registration is atomic: if
+// any key is already taken, nothing is registered.
 //
 // Example:
 //
@@ -188,47 +220,33 @@ func WithEager() ConstructorOption {
 //	}
 //	Provide(c, NewService)
 func Provide(c Vessel, constructor any, opts ...ConstructorOption) error {
-	// Analyze the constructor
 	info, err := analyzeConstructor(constructor)
 	if err != nil {
 		return fmt.Errorf("invalid constructor: %w", err)
 	}
 
-	// Apply options
-	config := &constructorConfig{
-		lifecycle: "singleton", // Default to singleton like dig
-	}
-	for _, opt := range opts {
-		opt.applyConstructor(config)
-	}
+	config := newConstructorConfig(opts)
 
-	// Get the container implementation
-	impl, ok := c.(*containerImpl)
-	if !ok {
-		return fmt.Errorf("Provide requires *containerImpl, got %T", c)
+	impl, rc, err := containerFor(c, "Provide")
+	if err != nil {
+		return err
 	}
 
-	// Ensure type registry exists
-	if impl.typeRegistry == nil {
-		impl.typeRegistry = newTypeRegistry()
-	}
-
-	// Create factory function that auto-resolves dependencies
-	factory := createAutoResolveFactory(info, impl)
-
-	// Register each result type
 	results := info.flattenResults()
+	call := sharedConstructorCall(info, impl, config.lifecycle, len(results) > 1)
+
+	var (
+		entries []keyedRegistration
+		regs    []*typeRegistration
+	)
+
 	for _, result := range results {
-		// Use configured name or result-specific name
 		name := config.name
 		if result.name != "" {
 			name = result.name
 		}
 
-		key := typeKey{typ: result.typ, name: name}
-
-		// Determine groups for this result
-		groups := []string{}
+		var groups []string
 		if config.group != "" {
 			groups = append(groups, config.group)
 		}
@@ -236,81 +254,178 @@ func Provide(c Vessel, constructor any, opts ...ConstructorOption) error {
 			groups = append(groups, result.group)
 		}
 
-		// Create wrapper factory for multi-result constructors (Out structs)
-		resultFactory := factory
-		if len(results) > 1 && result.fieldName != "" {
-			resultFactory = createMultiResultFactory(factory, result.fieldName, result.typ)
+		for _, asType := range config.asTypes {
+			if !result.typ.AssignableTo(asType) {
+				return fmt.Errorf("invalid constructor: %s does not implement %s", result.typ, asType)
+			}
 		}
-
-		// Check if the return type implements di.HealthChecker
-		isHealthCapable := isTypeHealthCapable(result.typ)
 
 		reg := &typeRegistration{
-			key:           key,
-			constructor:   info,
-			factory:       resultFactory,
+			key:           typeKey{typ: result.typ, name: name},
+			build:         resultBuilder(call, result),
 			lifecycle:     config.lifecycle,
 			groups:        groups,
-			healthCapable: isHealthCapable,
+			healthCapable: isTypeHealthCapable(result.typ),
 		}
 
-		if err := impl.typeRegistry.register(key, reg); err != nil {
-			return err
-		}
+		regs = append(regs, reg)
+		entries = append(entries, keysFor(reg, result.typ, name, config)...)
+	}
 
-		// Also register as additional interface types
-		for _, asType := range config.asTypes {
-			asKey := typeKey{typ: asType, name: name}
-			asReg := &typeRegistration{
-				key:           asKey,
-				constructor:   info,
-				factory:       resultFactory,
-				lifecycle:     config.lifecycle,
-				groups:        groups,
-				healthCapable: isHealthCapable,
-			}
-			if err := impl.typeRegistry.register(asKey, asReg); err != nil {
-				return err
-			}
-		}
+	if err := impl.typeRegistry.registerAll(entries); err != nil {
+		return err
+	}
 
-		// Register under additional aliases
-		// NOTE: Aliases point to the SAME registration object to share singleton instances
-		for _, alias := range config.aliases {
-			aliasKey := typeKey{typ: result.typ, name: alias}
-			if err := impl.typeRegistry.register(aliasKey, reg); err != nil {
-				return fmt.Errorf("failed to register alias %q: %w", alias, err)
-			}
-
-			// Also register aliases for additional interface types
-			// These share the same registration as the corresponding asType registration
-			for i, asType := range config.asTypes {
-				aliasAsKey := typeKey{typ: asType, name: alias}
-				// Find the corresponding asType registration to share
-				asKey := typeKey{typ: asType, name: name}
-				asReg, ok := impl.typeRegistry.get(asKey)
-				if !ok {
-					// This shouldn't happen since we just registered it above
-					return fmt.Errorf("failed to find registration for type %s", asType)
-				}
-				if err := impl.typeRegistry.register(aliasAsKey, asReg); err != nil {
-					return fmt.Errorf("failed to register alias %q for type %s: %w", alias, asType, err)
-				}
-				_ = i // Unused but kept for clarity
-			}
-		}
-
-		// Eager instantiation: trigger construction immediately
-		if config.eager {
-			// Resolve the primary key to trigger instantiation
-			_, err := impl.typeRegistry.resolve(key, c)
-			if err != nil {
-				return fmt.Errorf("eager instantiation failed for %s: %w", key, err)
+	if config.eager && config.lifecycle != lifecycleScoped {
+		for _, reg := range regs {
+			if _, err := reg.resolve(impl, rc); err != nil {
+				return fmt.Errorf("eager instantiation failed for %s: %w", reg.key, err)
 			}
 		}
 	}
 
 	return nil
+}
+
+// keysFor lists every key a registration answers to: its own type, each As
+// type, and every alias of each. All of them share reg, and so one instance.
+func keysFor(reg *typeRegistration, typ reflect.Type, name string, config *constructorConfig) []keyedRegistration {
+	types := append([]reflect.Type{typ}, config.asTypes...)
+
+	entries := make([]keyedRegistration, 0, len(types)*(1+len(config.aliases)))
+	for _, t := range types {
+		entries = append(entries, keyedRegistration{key: typeKey{typ: t, name: name}, reg: reg})
+
+		for _, alias := range config.aliases {
+			label := fmt.Sprintf("alias %q", alias)
+			if t != typ {
+				label = fmt.Sprintf("alias %q for type %s", alias, t)
+			}
+
+			entries = append(entries, keyedRegistration{key: typeKey{typ: t, name: alias}, reg: reg, label: label})
+		}
+	}
+
+	return entries
+}
+
+// constructorCall runs a constructor and returns its non-error results.
+type constructorCall func(rc resolveCtx) ([]reflect.Value, error)
+
+// sharedConstructorCall returns a call that, when the constructor provides
+// several services, runs once per lifetime (once per container for
+// singletons, once per scope for scoped) and is shared by all its results.
+func sharedConstructorCall(info *constructorInfo, impl *containerImpl, lifecycle string, multi bool) constructorCall {
+	call := func(rc resolveCtx) ([]reflect.Value, error) {
+		return callConstructor(info, impl, rc)
+	}
+
+	if !multi || lifecycle == lifecycleTransient {
+		return call
+	}
+
+	memo := &constructorMemo{label: info.fnType.String()}
+
+	return func(rc resolveCtx) ([]reflect.Value, error) {
+		rc, err := rc.enter(memo)
+		if err != nil {
+			return nil, err
+		}
+
+		build := func() (any, error) { return call(rc) }
+
+		var v any
+		if lifecycle == lifecycleScoped {
+			v, err = rc.scope.instance(memo, memo.label, build)
+		} else {
+			v, _, err = memo.get(build)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		return v.([]reflect.Value), nil
+	}
+}
+
+// constructorMemo holds the shared call result for a constructor that
+// provides several services.
+type constructorMemo struct {
+	onceValue
+	label string
+}
+
+// resultBuilder extracts one result, or one Out struct field, from a call.
+func resultBuilder(call constructorCall, result resultInfo) builder {
+	return func(rc resolveCtx) (any, error) {
+		values, err := call(rc)
+		if err != nil {
+			return nil, err
+		}
+
+		v := values[result.position]
+
+		if result.fieldName != "" {
+			if v.Kind() == reflect.Pointer {
+				if v.IsNil() {
+					return nil, fmt.Errorf("constructor returned a nil %s", v.Type())
+				}
+				v = v.Elem()
+			}
+
+			v = v.FieldByName(result.fieldName)
+			if !v.IsValid() {
+				return nil, fmt.Errorf("field %s not found in result struct", result.fieldName)
+			}
+		}
+
+		return v.Interface(), nil
+	}
+}
+
+// callConstructor resolves the constructor's parameters and calls it.
+func callConstructor(info *constructorInfo, impl *containerImpl, rc resolveCtx) ([]reflect.Value, error) {
+	args := make([]reflect.Value, len(info.params))
+
+	for i, param := range info.params {
+		if param.isIn {
+			inValue, err := resolveInStruct(param, impl, rc)
+			if err != nil {
+				return nil, err
+			}
+			args[i] = inValue
+
+			continue
+		}
+
+		resolved, err := resolveParam(param, impl, rc)
+		if err != nil {
+			return nil, err
+		}
+		args[i] = valueOf(resolved, param.typ)
+	}
+
+	results := info.fn.Call(args)
+
+	if info.hasError {
+		if errResult := results[len(results)-1]; !errResult.IsNil() {
+			return nil, errResult.Interface().(error)
+		}
+		results = results[:len(results)-1]
+	}
+
+	return results, nil
+}
+
+// valueOf converts a resolved instance to a reflect.Value of type t, using
+// the zero value for nil.
+func valueOf(v any, t reflect.Type) reflect.Value {
+	if v == nil {
+		return reflect.Zero(t)
+	}
+
+	return reflect.ValueOf(v)
 }
 
 // Deprecated: Use Provide instead.
@@ -340,7 +455,9 @@ func ProvideNamed(c Vessel, name string, constructor any, opts ...ConstructorOpt
 }
 
 // ProvideValue registers a pre-built instance as a singleton service.
-// The instance is registered by its type and can be resolved with Inject[T].
+// The instance is registered under the type parameter T, so pass T
+// explicitly to register a value under an interface type. Lifecycle options
+// are ignored: a value is always a singleton.
 //
 // Example:
 //
@@ -351,129 +468,38 @@ func ProvideNamed(c Vessel, name string, constructor any, opts ...ConstructorOpt
 //	config, _ := Inject[*Config](c)
 func ProvideValue[T any](c Vessel, value T, opts ...ConstructorOption) error {
 	t := reflect.TypeFor[T]()
+	config := newConstructorConfig(opts)
 
-	// Apply options
-	config := &constructorConfig{
-		lifecycle: "singleton",
-	}
-	for _, opt := range opts {
-		opt.applyConstructor(config)
+	impl, _, err := containerFor(c, "ProvideValue")
+	if err != nil {
+		return err
 	}
 
-	impl, ok := c.(*containerImpl)
-	if !ok {
-		return fmt.Errorf("ProvideValue requires *containerImpl, got %T", c)
+	for _, asType := range config.asTypes {
+		if !t.AssignableTo(asType) {
+			return fmt.Errorf("ProvideValue: %s does not implement %s", t, asType)
+		}
 	}
 
-	if impl.typeRegistry == nil {
-		impl.typeRegistry = newTypeRegistry()
-	}
-
-	key := typeKey{typ: t, name: config.name}
-
-	// Check health capability via runtime type assertion on the value
 	_, isHealthCapable := any(value).(di.HealthChecker)
 
 	reg := &typeRegistration{
-		key:           key,
-		factory:       func(_ Vessel) (any, error) { return value, nil },
+		key:           typeKey{typ: t, name: config.name},
+		build:         func(resolveCtx) (any, error) { return value, nil },
 		instance:      value,
-		lifecycle:     "singleton",
-		groups:        []string{},
+		lifecycle:     lifecycleSingleton,
 		healthCapable: isHealthCapable,
 	}
 
 	if config.group != "" {
-		reg.groups = append(reg.groups, config.group)
+		reg.groups = []string{config.group}
 	}
 
-	if err := impl.typeRegistry.register(key, reg); err != nil {
-		return err
-	}
-
-	// Register aliases
-	for _, alias := range config.aliases {
-		aliasKey := typeKey{typ: t, name: alias}
-		if err := impl.typeRegistry.register(aliasKey, reg); err != nil {
-			return fmt.Errorf("failed to register alias %q: %w", alias, err)
-		}
-	}
-
-	// Register as additional interface types
-	for _, asType := range config.asTypes {
-		asKey := typeKey{typ: asType, name: config.name}
-		asReg := &typeRegistration{
-			key:           asKey,
-			factory:       func(_ Vessel) (any, error) { return value, nil },
-			instance:      value,
-			lifecycle:     "singleton",
-			groups:        reg.groups,
-			healthCapable: isHealthCapable,
-		}
-		if err := impl.typeRegistry.register(asKey, asReg); err != nil {
-			return err
-		}
-
-		for _, alias := range config.aliases {
-			aliasAsKey := typeKey{typ: asType, name: alias}
-			if err := impl.typeRegistry.register(aliasAsKey, asReg); err != nil {
-				return fmt.Errorf("failed to register alias %q for type %s: %w", alias, asType, err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// createAutoResolveFactory creates a factory that automatically resolves
-// constructor parameters from the container
-func createAutoResolveFactory(info *constructorInfo, impl *containerImpl) Factory {
-	return func(container Vessel) (any, error) {
-		// Build arguments for the constructor call
-		args := make([]reflect.Value, len(info.params))
-
-		for i, param := range info.params {
-			if param.isIn {
-				// Create In struct and populate fields
-				inValue, err := resolveInStruct(param, impl)
-				if err != nil {
-					return nil, err
-				}
-				args[i] = inValue
-			} else {
-				// Resolve single parameter by type
-				resolved, err := resolveParam(param, impl)
-				if err != nil {
-					return nil, err
-				}
-				args[i] = reflect.ValueOf(resolved)
-			}
-		}
-
-		// Call the constructor
-		results := info.fn.Call(args)
-
-		// Handle error return
-		if info.hasError {
-			errResult := results[len(results)-1]
-			if !errResult.IsNil() {
-				return nil, errResult.Interface().(error)
-			}
-			results = results[:len(results)-1]
-		}
-
-		// Return primary result
-		if len(results) == 0 {
-			return nil, fmt.Errorf("constructor returned no results")
-		}
-
-		// For Out structs, return the struct itself (extraction happens in multi-result factory)
-		return results[0].Interface(), nil
-	}
+	return impl.typeRegistry.registerAll(keysFor(reg, t, config.name, config))
 }
 
 // resolveInStruct creates and populates an In struct with resolved dependencies
-func resolveInStruct(param paramInfo, impl *containerImpl) (reflect.Value, error) {
+func resolveInStruct(param paramInfo, impl *containerImpl, rc resolveCtx) (reflect.Value, error) {
 	structType := param.typ
 	isPtr := structType.Kind() == reflect.Pointer
 	if isPtr {
@@ -483,19 +509,19 @@ func resolveInStruct(param paramInfo, impl *containerImpl) (reflect.Value, error
 	structValue := reflect.New(structType).Elem()
 
 	for _, field := range param.inFields {
-		var resolved any
-		var err error
+		var (
+			resolved any
+			err      error
+		)
 
 		if field.group {
-			// Resolve group as slice
-			resolved, err = resolveGroup(field, impl)
+			resolved, err = resolveGroup(field, impl, rc)
 		} else {
-			// Resolve single dependency
-			resolved, err = resolveParam(field, impl)
+			resolved, err = resolveParam(field, impl, rc)
 		}
 
 		if err != nil {
-			if field.optional {
+			if field.optional && isNotFound(err) {
 				// Leave as zero value for optional dependencies
 				continue
 			}
@@ -508,113 +534,78 @@ func resolveInStruct(param paramInfo, impl *containerImpl) (reflect.Value, error
 	}
 
 	if isPtr {
-		ptrValue := reflect.New(structType)
-		ptrValue.Elem().Set(structValue)
-		return ptrValue, nil
+		return structValue.Addr(), nil
 	}
 
 	return structValue, nil
 }
 
+// isNotFound reports whether err means a dependency has no provider.
+func isNotFound(err error) bool {
+	return errors.Is(err, ErrServiceNotFoundSentinel)
+}
+
 // resolveParam resolves a single parameter from the type registry
-func resolveParam(param paramInfo, impl *containerImpl) (any, error) {
+func resolveParam(param paramInfo, impl *containerImpl, rc resolveCtx) (any, error) {
 	key := typeKey{typ: param.typ, name: param.name}
 
-	// Try type registry first
 	if impl.typeRegistry != nil {
 		if reg, ok := impl.typeRegistry.get(key); ok {
-			return reg.resolve(impl)
+			return reg.resolve(impl, rc)
 		}
 	}
 
-	// If not found and optional, return nil
 	if param.optional {
 		return nil, nil
 	}
 
-	return nil, fmt.Errorf("no provider for type %s", key)
+	return nil, errNoTypeProvider("no provider for type %s", key)
 }
 
 // resolveGroup resolves all services in a group as a slice
-func resolveGroup(param paramInfo, impl *containerImpl) (any, error) {
-	if impl.typeRegistry == nil {
-		if param.optional {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("no providers for group %s", param.groupKey)
+func resolveGroup(param paramInfo, impl *containerImpl, rc resolveCtx) (any, error) {
+	var regs []*typeRegistration
+	if impl.typeRegistry != nil {
+		regs = impl.typeRegistry.getGroup(param.groupKey)
 	}
 
-	regs := impl.typeRegistry.getGroup(param.groupKey)
 	if len(regs) == 0 {
 		if param.optional {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("no providers for group %s", param.groupKey)
+
+		return nil, errs.NewError(CodeServiceNotFound, fmt.Sprintf("no providers for group %s", param.groupKey), nil)
 	}
 
-	// Create slice of the element type
 	elemType := param.typ.Elem() // param.typ is a slice, get element type
 	sliceValue := reflect.MakeSlice(param.typ, 0, len(regs))
 
 	for _, reg := range regs {
-		instance, err := reg.resolve(impl)
+		instance, err := reg.resolve(impl, rc)
 		if err != nil {
 			return nil, err
 		}
-		sliceValue = reflect.Append(sliceValue, reflect.ValueOf(instance).Convert(elemType))
+
+		v := valueOf(instance, elemType)
+		if !v.Type().AssignableTo(elemType) {
+			return nil, fmt.Errorf("group %s: %s is not assignable to %s", param.groupKey, v.Type(), elemType)
+		}
+
+		sliceValue = reflect.Append(sliceValue, v)
 	}
 
 	return sliceValue.Interface(), nil
 }
 
-// createMultiResultFactory wraps a factory to extract a specific result from Out struct
-func createMultiResultFactory(baseFactory Factory, fieldName string, resultType reflect.Type) Factory {
-	return func(container Vessel) (any, error) {
-		result, err := baseFactory(container)
-		if err != nil {
-			return nil, err
-		}
-
-		// Extract the specific field from Out struct by name
-		resultValue := reflect.ValueOf(result)
-		if resultValue.Kind() == reflect.Pointer {
-			resultValue = resultValue.Elem()
-		}
-
-		if resultValue.Kind() != reflect.Struct {
-			// Not an Out struct, return as-is (single result)
-			return result, nil
-		}
-
-		// Find the field by name
-		fieldValue := resultValue.FieldByName(fieldName)
-		if !fieldValue.IsValid() {
-			return nil, fmt.Errorf("field %s not found in result struct", fieldName)
-		}
-		return fieldValue.Interface(), nil
-	}
-}
-
-// Inject resolves a service by its type.
-//
-// Example:
-//
-//	db, err := Inject[*Database](c)
-func Inject[T any](c Vessel) (T, error) {
+// injectKey resolves key and asserts the result to T.
+func injectKey[T any](impl *containerImpl, rc resolveCtx, key typeKey) (T, error) {
 	var zero T
-	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
-
-	impl, ok := c.(*containerImpl)
-	if !ok {
-		return zero, fmt.Errorf("Inject requires *containerImpl, got %T", c)
-	}
 
 	if impl.typeRegistry == nil {
-		return zero, fmt.Errorf("no type registry available")
+		return zero, errNoTypeProvider("no service registered for type %s", key)
 	}
 
-	key := typeKey{typ: t}
-	instance, err := impl.typeRegistry.resolve(key, c)
+	instance, err := impl.typeRegistry.resolve(key, impl, rc)
 	if err != nil {
 		return zero, err
 	}
@@ -625,6 +616,15 @@ func Inject[T any](c Vessel) (T, error) {
 	}
 
 	return typed, nil
+}
+
+// Inject resolves a service by its type.
+//
+// Example:
+//
+//	db, err := Inject[*Database](c)
+func Inject[T any](c Vessel) (T, error) {
+	return InjectNamed[T](c, "")
 }
 
 // MustInject resolves a service by its type, panicking on error.
@@ -644,30 +644,13 @@ func MustInject[T any](c Vessel) T {
 //	primaryDB, err := InjectNamed[*Database](c, "primary")
 //	replicaDB, err := InjectNamed[*Database](c, "replica")
 func InjectNamed[T any](c Vessel, name string) (T, error) {
-	var zero T
-	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
-
-	impl, ok := c.(*containerImpl)
+	impl, rc, ok := unwrapContainer(c)
 	if !ok {
-		return zero, fmt.Errorf("InjectNamed requires *containerImpl, got %T", c)
+		var zero T
+		return zero, fmt.Errorf("Inject requires a container created by vessel.New, got %T", c)
 	}
 
-	if impl.typeRegistry == nil {
-		return zero, fmt.Errorf("no type registry available")
-	}
-
-	key := typeKey{typ: t, name: name}
-	instance, err := impl.typeRegistry.resolve(key, c)
-	if err != nil {
-		return zero, err
-	}
-
-	typed, ok := instance.(T)
-	if !ok {
-		return zero, fmt.Errorf("type mismatch: expected %T, got %T", zero, instance)
-	}
-
-	return typed, nil
+	return injectKey[T](impl, rc, typeKey{typ: reflect.TypeFor[T](), name: name})
 }
 
 // MustInjectNamed resolves a named service by its type, panicking on error.
@@ -679,19 +662,58 @@ func MustInjectNamed[T any](c Vessel, name string) T {
 	return result
 }
 
-// InjectGroup resolves all services in a group as a slice.
+// InjectScoped resolves a service by its type from a scope. Services
+// registered with AsScoped get one instance per scope; singletons come from
+// the container and transients are built fresh.
+//
+// Example:
+//
+//	scope := c.BeginScope()
+//	defer scope.End()
+//	session, err := InjectScoped[*Session](scope)
+func InjectScoped[T any](s Scope) (T, error) {
+	return InjectScopedNamed[T](s, "")
+}
+
+// MustInjectScoped resolves a service by its type from a scope, panicking on error.
+func MustInjectScoped[T any](s Scope) T {
+	result, err := InjectScoped[T](s)
+	if err != nil {
+		panic(fmt.Sprintf("MustInjectScoped failed: %v", err))
+	}
+	return result
+}
+
+// InjectScopedNamed resolves a named service by its type from a scope.
+func InjectScopedNamed[T any](s Scope, name string) (T, error) {
+	var zero T
+
+	sc, ok := s.(*scope)
+	if !ok {
+		return zero, fmt.Errorf("InjectScoped requires a scope created by BeginScope, got %T", s)
+	}
+
+	if sc.IsEnded() {
+		return zero, ErrScopeEnded
+	}
+
+	return injectKey[T](sc.parent, resolveCtx{scope: sc}, typeKey{typ: reflect.TypeFor[T](), name: name})
+}
+
+// InjectGroup resolves all services in a group as a slice, in registration order.
+// An empty or unknown group returns a nil slice and no error.
 //
 // Example:
 //
 //	handlers, err := InjectGroup[Handler](c, "http")
 func InjectGroup[T any](c Vessel, group string) ([]T, error) {
-	impl, ok := c.(*containerImpl)
+	impl, rc, ok := unwrapContainer(c)
 	if !ok {
-		return nil, fmt.Errorf("InjectGroup requires *containerImpl, got %T", c)
+		return nil, fmt.Errorf("InjectGroup requires a container created by vessel.New, got %T", c)
 	}
 
 	if impl.typeRegistry == nil {
-		return nil, fmt.Errorf("no type registry available")
+		return nil, errors.New("no type registry available")
 	}
 
 	regs := impl.typeRegistry.getGroup(group)
@@ -701,7 +723,7 @@ func InjectGroup[T any](c Vessel, group string) ([]T, error) {
 
 	result := make([]T, 0, len(regs))
 	for _, reg := range regs {
-		instance, err := reg.resolve(c)
+		instance, err := reg.resolve(impl, rc)
 		if err != nil {
 			return nil, err
 		}
@@ -726,32 +748,15 @@ func MustInjectGroup[T any](c Vessel, group string) []T {
 
 // HasType checks if a service of the given type is registered.
 func HasType[T any](c Vessel) bool {
-	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
-
-	impl, ok := c.(*containerImpl)
-	if !ok {
-		return false
-	}
-
-	if impl.typeRegistry == nil {
-		return false
-	}
-
-	return impl.typeRegistry.has(typeKey{typ: t})
+	return HasTypeNamed[T](c, "")
 }
 
 // HasTypeNamed checks if a named service of the given type is registered.
 func HasTypeNamed[T any](c Vessel, name string) bool {
-	t := reflect.TypeOf((*T)(nil)).Elem() // Get the type even for interfaces
-
-	impl, ok := c.(*containerImpl)
-	if !ok {
+	impl, _, ok := unwrapContainer(c)
+	if !ok || impl.typeRegistry == nil {
 		return false
 	}
 
-	if impl.typeRegistry == nil {
-		return false
-	}
-
-	return impl.typeRegistry.has(typeKey{typ: t, name: name})
+	return impl.typeRegistry.has(typeKey{typ: reflect.TypeFor[T](), name: name})
 }

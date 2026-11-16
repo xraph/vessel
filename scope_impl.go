@@ -1,105 +1,157 @@
 package vessel
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xraph/go-utils/di"
 )
 
 // scope implements Scope.
 type scope struct {
-	parent    *containerImpl
-	instances map[string]any
-	context   map[string]any // Context storage for request-specific data
-	mu        sync.RWMutex
-	ended     bool
+	parent  *containerImpl
+	entries map[any]*onceValue // keyed by registration pointer; created on first use
+	created []scopedInstance   // creation order, for disposal and Services
+	context map[string]any     // Context storage for request-specific data; created on first Set
+	mu      sync.RWMutex
+	ended   atomic.Bool // written under mu, read lock-free
+}
+
+// scopedInstance is one instance created in this scope.
+type scopedInstance struct {
+	name  string
+	value any
+	named bool // registered with Register (listed by Services)
 }
 
 // newScope creates a new scope.
 func newScope(parent *containerImpl) *scope {
-	return &scope{
-		parent:    parent,
-		instances: make(map[string]any),
-		context:   make(map[string]any),
-	}
+	return &scope{parent: parent}
 }
 
 // Resolve returns a service by name from this scope.
+// Scoped services are cached for the life of the scope, singletons come from
+// the parent container, and transients are built fresh. Factories receive a
+// container bound to this scope, so a scoped or transient factory can resolve
+// other scoped services from the same scope.
 func (s *scope) Resolve(name string) (any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.ended {
+	if s.IsEnded() {
 		return nil, ErrScopeEnded
 	}
 
-	// Get registration from parent
-	s.parent.mu.RLock()
-	reg, exists := s.parent.services[name]
-	s.parent.mu.RUnlock()
-
-	if !exists {
-		return nil, ErrServiceNotFound(name)
-	}
-
-	// Singleton services: resolve from parent
-	if reg.singleton {
-		return s.parent.Resolve(name)
-	}
-
-	// Scoped services: cache in this scope
-	if reg.scoped {
-		if instance, ok := s.instances[name]; ok {
-			return instance, nil
-		}
-
-		// Create new instance for this scope
-		instance, err := reg.factory(s.parent)
-		if err != nil {
-			return nil, NewServiceError(name, "resolve", err)
-		}
-
-		s.instances[name] = instance
-
-		return instance, nil
-	}
-
-	// Transient services: always create new
-	instance, err := reg.factory(s.parent)
-	if err != nil {
-		return nil, NewServiceError(name, "resolve", err)
-	}
-
-	return instance, nil
+	return s.parent.resolveNamed(resolveCtx{scope: s}, name)
 }
 
-// End cleans up all scoped services in this scope.
-func (s *scope) End() error {
+// cached returns the scope's instance for key if it has already been built.
+func (s *scope) cached(key any) (any, bool, error) {
+	if s.ended.Load() {
+		return nil, false, ErrScopeEnded
+	}
+
+	s.mu.RLock()
+	entry := s.entries[key]
+	s.mu.RUnlock()
+
+	if entry == nil {
+		return nil, false, nil
+	}
+
+	v, ok := entry.load()
+
+	return v, ok, nil
+}
+
+// entry returns the build slot for key, creating it if needed.
+func (s *scope) entry(key any) (*onceValue, error) {
+	if s.ended.Load() {
+		return nil, ErrScopeEnded
+	}
+
+	s.mu.RLock()
+	entry := s.entries[key]
+	s.mu.RUnlock()
+
+	if entry != nil {
+		return entry, nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.ended {
+	if s.ended.Load() {
+		return nil, ErrScopeEnded
+	}
+
+	if entry = s.entries[key]; entry == nil {
+		if s.entries == nil {
+			s.entries = make(map[any]*onceValue)
+		}
+
+		entry = &onceValue{}
+		s.entries[key] = entry
+	}
+
+	return entry, nil
+}
+
+// instance returns the scope's instance for a registration, building it with
+// build on first use. key must uniquely identify the registration.
+func (s *scope) instance(key any, name string, build func() (any, error)) (any, error) {
+	entry, err := s.entry(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// The entry lock is not s.mu, so the factory can resolve other scoped
+	// services from this scope. Cycles were already caught by the caller.
+	value, created, err := entry.get(build)
+	if err != nil || !created {
+		return value, err
+	}
+
+	_, named := key.(*serviceRegistration)
+
+	s.mu.Lock()
+	s.created = append(s.created, scopedInstance{name: name, value: value, named: named})
+	s.mu.Unlock()
+
+	return value, nil
+}
+
+// End disposes every scoped instance that implements di.Disposable, in the
+// reverse of the order they were created, and returns all failures joined.
+func (s *scope) End() error {
+	s.mu.Lock()
+
+	if s.ended.Load() {
+		s.mu.Unlock()
+
 		return ErrScopeEnded
 	}
 
-	// Dispose of scoped instances in reverse order
+	created := s.created
+	s.created = nil
+	s.entries = nil
+	s.context = nil
+	s.ended.Store(true)
+
+	s.mu.Unlock()
+
 	var errs []error
 
-	for name, instance := range s.instances {
-		if disposable, ok := instance.(di.Disposable); ok {
+	for i := len(created) - 1; i >= 0; i-- {
+		inst := created[i]
+		if disposable, ok := inst.value.(di.Disposable); ok {
 			if err := disposable.Dispose(); err != nil {
-				errs = append(errs, fmt.Errorf("failed to dispose %s: %w", name, err))
+				errs = append(errs, fmt.Errorf("failed to dispose %s: %w", inst.name, err))
 			}
 		}
 	}
 
-	s.instances = nil
-	s.context = nil
-	s.ended = true
-
 	if len(errs) > 0 {
-		return fmt.Errorf("scope cleanup errors: %v", errs)
+		return fmt.Errorf("scope cleanup errors: %w", errors.Join(errs...))
 	}
 
 	return nil
@@ -112,20 +164,22 @@ func (s *scope) Has(name string) bool {
 
 // IsEnded returns true if the scope has been ended.
 func (s *scope) IsEnded() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.ended
+	return s.ended.Load()
 }
 
-// Services returns a list of services resolved in this scope.
+// Services returns the names of named services resolved in this scope,
+// in the order they were created.
 func (s *scope) Services() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	names := make([]string, 0, len(s.instances))
-	for name := range s.instances {
-		names = append(names, name)
+	names := make([]string, 0, len(s.created))
+	for _, inst := range s.created {
+		if inst.named {
+			names = append(names, inst.name)
+		}
 	}
+
 	return names
 }
 
@@ -139,8 +193,12 @@ func (s *scope) Set(key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.ended {
+	if s.ended.Load() {
 		return // Silently ignore if scope ended
+	}
+
+	if s.context == nil {
+		s.context = make(map[string]any)
 	}
 
 	s.context[key] = value
@@ -152,5 +210,6 @@ func (s *scope) Get(key string) (any, bool) {
 	defer s.mu.RUnlock()
 
 	value, ok := s.context[key]
+
 	return value, ok
 }
