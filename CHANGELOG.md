@@ -1,3 +1,9 @@
+## [1.0.7](https://github.com/xraph/vessel/compare/v1.0.6...v1.0.7) (2026-11-16)
+
+### Bug Fixes
+
+* **deps:** bump go-utils to v1.5.1 ([5478eac](https://github.com/xraph/vessel/commit/5478eac80af6d60d79f6eba6682ba2e9758c6183))
+
 ## [1.0.6](https://github.com/xraph/vessel/compare/v1.0.5...v1.0.6) (2026-11-16)
 
 ### Bug Fixes
