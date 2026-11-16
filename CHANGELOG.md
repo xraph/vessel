@@ -1,3 +1,9 @@
+## [1.0.6](https://github.com/xraph/vessel/compare/v1.0.5...v1.0.6) (2026-11-16)
+
+### Bug Fixes
+
+* resolution, lifecycle and scoping bugs, and faster hot paths ([#3](https://github.com/xraph/vessel/issues/3)) ([a22e137](https://github.com/xraph/vessel/commit/a22e1373ac6c1526151676cf4f00aea15d38bbaa))
+
 ## [1.0.5](https://github.com/xraph/vessel/compare/v1.0.4...v1.0.5) (2026-11-03)
 
 ### Documentation
