@@ -1,5 +1,7 @@
 package vessel
 
+import "strings"
+
 // ServiceQuery defines criteria for querying services.
 type ServiceQuery struct {
 	// Lifecycle filters by service lifecycle (singleton, transient, scoped).
@@ -126,26 +128,9 @@ func FindNotStarted(c Vessel) []ServiceInfo {
 // Groups might be stored in different places depending on how they were registered.
 func extractGroups(info ServiceInfo) []string {
 	// Check if groups are stored in __groups metadata (comma-separated)
-	if groupStr, ok := info.Metadata["__groups"]; ok && groupStr != "" {
-		return splitStrings(groupStr, ",")
+	if groupStr, ok := info.Metadata[groupsMetadataKey]; ok && groupStr != "" {
+		return strings.Split(groupStr, ",")
 	}
 
 	return nil
-}
-
-// splitStrings is a helper to split strings.
-func splitStrings(s, sep string) []string {
-	if s == "" {
-		return nil
-	}
-	result := []string{}
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == sep[0] {
-			result = append(result, s[start:i])
-			start = i + 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
 }

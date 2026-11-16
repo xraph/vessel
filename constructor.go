@@ -72,6 +72,7 @@ type resultInfo struct {
 	group     string       // From `group:"..."` tag
 	index     int          // Position in function results or struct field index
 	fieldName string       // The actual struct field name (for Out structs)
+	position  int          // Index among the constructor's non-error results
 	isOut     bool         // Whether this is an Out struct (expanded into multiple results)
 	outFields []resultInfo // Expanded fields if isOut is true
 }
@@ -79,11 +80,19 @@ type resultInfo struct {
 // analyzeConstructor inspects a constructor function and extracts its dependency
 // and result information for automatic resolution.
 func analyzeConstructor(constructor any) (*constructorInfo, error) {
+	if constructor == nil {
+		return nil, errors.New("constructor must be a function, got nil")
+	}
+
 	fnValue := reflect.ValueOf(constructor)
 	fnType := fnValue.Type()
 
 	if fnType.Kind() != reflect.Func {
 		return nil, errors.New("constructor must be a function")
+	}
+
+	if fnValue.IsNil() {
+		return nil, errors.New("constructor must be a function, got a nil func")
 	}
 
 	info := &constructorInfo{
@@ -105,8 +114,10 @@ func analyzeConstructor(constructor any) (*constructorInfo, error) {
 	for i := 0; i < fnType.NumOut(); i++ {
 		resultType := fnType.Out(i)
 
-		// Check for error return (must be last)
-		if resultType.Implements(errorType) {
+		// Check for error return (must be last). Only the error interface
+		// itself counts: a concrete type that happens to implement error is
+		// a regular result.
+		if resultType == errorType {
 			if i != fnType.NumOut()-1 {
 				return nil, errors.New("error must be the last return value")
 			}
@@ -311,10 +322,14 @@ func expandOutStruct(t reflect.Type) ([]resultInfo, error) {
 // flattenResults returns all results including expanded Out struct fields
 func (c *constructorInfo) flattenResults() []resultInfo {
 	var flat []resultInfo
-	for _, r := range c.results {
+	for pos, r := range c.results {
 		if r.isOut {
-			flat = append(flat, r.outFields...)
+			for _, f := range r.outFields {
+				f.position = pos
+				flat = append(flat, f)
+			}
 		} else {
+			r.position = pos
 			flat = append(flat, r)
 		}
 	}

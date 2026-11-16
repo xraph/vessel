@@ -2,21 +2,39 @@ package vessel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xraph/go-utils/di"
 )
 
 // containerImpl implements Container.
 type containerImpl struct {
-	services     map[string]*serviceRegistration
-	instances    map[string]any
+	// byName is read on every Resolve without locking. Writes happen under
+	// mu, together with ordered and graph.
+	byName       snapMap[string, *serviceRegistration]
+	ordered      []*serviceRegistration // registration order, append-only
 	graph        *DependencyGraph
-	middleware   *middlewareChain
+	middleware   middlewareChain
 	typeRegistry *typeRegistry // Type-based registry for dig-like constructor injection
 	started      bool
 	mu           sync.RWMutex
+
+	// startOrder records every singleton in the order it was actually started,
+	// across both registries. A service always finishes starting after the
+	// dependencies it resolved, so stopping in reverse is dependency-safe.
+	startOrder []startedEntry
+	lifeMu     sync.Mutex
+}
+
+// startedEntry is one started singleton from either registry.
+type startedEntry struct {
+	named *serviceRegistration
+	typed *typeRegistration
 }
 
 // serviceRegistration holds service registration details.
@@ -31,27 +49,29 @@ type serviceRegistration struct {
 	metadata     map[string]string
 	instance     any
 	started      bool
-	mu           sync.RWMutex
+	mu           sync.RWMutex // guards instance and started
+	initMu       sync.Mutex   // held while building and starting the singleton
+
+	// ready is set once the singleton is built and started, and cleared by
+	// Stop. When set, instance can be read without locking: it is written
+	// before ready is stored and never changes afterwards.
+	ready atomic.Bool
 }
 
 // newContainerImpl creates a new DI container implementation.
 func newContainerImpl() Vessel {
 	return &containerImpl{
-		services:     make(map[string]*serviceRegistration),
-		instances:    make(map[string]any),
 		graph:        NewDependencyGraph(),
-		middleware:   newMiddlewareChain(),
 		typeRegistry: newTypeRegistry(),
 	}
 }
 
 // Register adds a service factory to the container.
 func (c *containerImpl) Register(name string, factory Factory, opts ...RegisterOption) error {
-	// Merge options
 	merged := mergeOptions(opts)
 
 	if name == "" {
-		return fmt.Errorf("service name cannot be empty")
+		return errors.New("service name cannot be empty")
 	}
 
 	if factory == nil {
@@ -61,30 +81,25 @@ func (c *containerImpl) Register(name string, factory Factory, opts ...RegisterO
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, exists := c.services[name]; exists {
-		return ErrServiceAlreadyExists(name)
-	}
-
-	// Get all dependency specs (merges string-based and Dep-based)
 	allDeps := merged.GetAllDeps()
-	allDepNames := merged.GetAllDepNames()
 
-	// Create registration from merged options
 	reg := &serviceRegistration{
 		name:         name,
 		factory:      factory,
 		singleton:    merged.Lifecycle == "singleton",
 		scoped:       merged.Lifecycle == "scoped",
-		dependencies: allDepNames,
+		dependencies: merged.GetAllDepNames(),
 		deps:         allDeps,
 		groups:       merged.Groups,
 		metadata:     merged.Metadata,
 	}
 
-	// Add to services map
-	c.services[name] = reg
+	if !c.byName.StoreNew(name, reg) {
+		return ErrServiceAlreadyExists(name)
+	}
 
-	// Add to dependency graph with full Dep specs
+	c.ordered = append(c.ordered, reg)
+
 	if len(allDeps) > 0 {
 		c.graph.AddNodeWithDeps(name, allDeps)
 	} else {
@@ -98,146 +113,191 @@ func (c *containerImpl) Register(name string, factory Factory, opts ...RegisterO
 // For singleton services that implement di.Starter, the service is automatically
 // started when first resolved.
 func (c *containerImpl) Resolve(name string) (any, error) {
-	ctx := context.Background()
+	return c.resolveNamed(resolveCtx{}, name)
+}
 
-	// Call middleware before resolve
-	if err := c.middleware.beforeResolve(ctx, name); err != nil {
+// resolveNamed runs middleware around a named resolution.
+func (c *containerImpl) resolveNamed(rc resolveCtx, name string) (any, error) {
+	mws := c.middleware.list()
+	if len(mws) == 0 {
+		return c.resolveInternal(rc, name)
+	}
+
+	ctx := rc.context()
+
+	if err := beforeResolve(mws, ctx, name); err != nil {
 		return nil, err
 	}
 
-	// Perform actual resolution
-	service, err := c.resolveInternal(name)
+	service, err := c.resolveInternal(rc, name)
 
-	// Call middleware after resolve
-	if mwErr := c.middleware.afterResolve(ctx, name, service, err); mwErr != nil {
+	if mwErr := afterResolve(mws, ctx, name, service, err); mwErr != nil {
 		return nil, mwErr
 	}
 
 	return service, err
 }
 
-// resolveInternal performs the actual service resolution without middleware.
-func (c *containerImpl) resolveInternal(name string) (any, error) {
-	c.mu.RLock()
-	reg, exists := c.services[name]
-	c.mu.RUnlock()
+func (c *containerImpl) lookup(name string) (*serviceRegistration, bool) {
+	return c.byName.Load(name)
+}
 
+// registrations returns every named registration in registration order.
+// The slice is append-only, so the snapshot is safe to read without copying.
+func (c *containerImpl) registrations() []*serviceRegistration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.ordered
+}
+
+// resolveInternal performs the actual service resolution without middleware.
+func (c *containerImpl) resolveInternal(rc resolveCtx, name string) (any, error) {
+	reg, exists := c.lookup(name)
 	if !exists {
 		return nil, ErrServiceNotFound(name)
 	}
 
-	// Singleton: return cached instance
-	if reg.singleton {
-		// Fast path: check if already created AND started (read lock)
-		reg.mu.RLock()
-
-		if reg.instance != nil && reg.started {
-			instance := reg.instance
-			reg.mu.RUnlock()
-
-			return instance, nil
-		}
-		// Check if instance exists but not started
-		existingInstance := reg.instance
-		reg.mu.RUnlock()
-
-		// Slow path: create and/or start instance (write lock)
-		reg.mu.Lock()
-		defer reg.mu.Unlock()
-
-		// Double-check after acquiring write lock
-		if reg.instance != nil && reg.started {
-			return reg.instance, nil
-		}
-
-		// Create instance if needed
-		if reg.instance == nil {
-			instance, err := reg.factory(c)
-			if err != nil {
-				return nil, NewServiceError(name, "resolve", err)
-			}
-
-			reg.instance = instance
-			existingInstance = instance
-		}
-
-		// Auto-start if service implements di.Starter and not yet started
-		if !reg.started {
-			if starter, ok := existingInstance.(di.Starter); ok {
-				ctx := context.Background()
-
-				// Call middleware before start
-				if err := c.middleware.beforeStart(ctx, name); err != nil {
-					return nil, err
-				}
-
-				startErr := starter.Start(ctx)
-
-				// Call middleware after start
-				if mwErr := c.middleware.afterStart(ctx, name, startErr); mwErr != nil {
-					return nil, mwErr
-				}
-
-				if startErr != nil {
-					return nil, NewServiceError(name, "auto_start", startErr)
-				}
-			}
-
-			reg.started = true
-		}
-
+	// Fast paths: a ready singleton or an already-built scoped instance
+	// needs no cycle check and no allocation.
+	if reg.singleton && reg.ready.Load() {
 		return reg.instance, nil
 	}
 
-	// Scoped services should be resolved from scope, not container
-	if reg.scoped {
-		return nil, fmt.Errorf("scoped service %s must be resolved from a scope", name)
+	if reg.scoped && rc.scope != nil {
+		if v, ok, err := rc.scope.cached(reg); ok || err != nil {
+			return v, err
+		}
 	}
 
-	// Transient: create new instance each time
-	instance, err := reg.factory(c)
-	if err != nil {
-		return nil, NewServiceError(name, "resolve", err)
+	if err := rc.check(reg); err != nil {
+		return nil, err
 	}
 
-	// Auto-start transient services that implement di.Starter
-	if starter, ok := instance.(di.Starter); ok {
-		ctx := context.Background()
+	switch {
+	case reg.singleton:
+		return c.resolveSingleton(rc.withoutScope(), reg)
 
-		// Call middleware before start
-		if err := c.middleware.beforeStart(ctx, name); err != nil {
+	case reg.scoped:
+		if rc.scope == nil {
+			return nil, fmt.Errorf("scoped service %s must be resolved from a scope", name)
+		}
+
+		return rc.scope.instance(reg, name, func() (any, error) {
+			return c.callFactory(rc, reg)
+		})
+
+	default:
+		instance, err := c.callFactory(rc, reg)
+		if err != nil {
 			return nil, err
 		}
 
-		startErr := starter.Start(ctx)
-
-		// Call middleware after start
-		if mwErr := c.middleware.afterStart(ctx, name, startErr); mwErr != nil {
-			return nil, mwErr
+		// Transient instances are started but not tracked: the caller owns them.
+		if err := c.startInstance(rc.context(), name, instance); err != nil {
+			return nil, err
 		}
 
-		if startErr != nil {
-			return nil, NewServiceError(name, "auto_start", startErr)
+		return instance, nil
+	}
+}
+
+// resolveSingleton builds and starts a singleton exactly once.
+func (c *containerImpl) resolveSingleton(rc resolveCtx, reg *serviceRegistration) (any, error) {
+	// Cycles were ruled out by rc.enter, so this only waits for another
+	// goroutine that is building the same singleton.
+	reg.initMu.Lock()
+	defer reg.initMu.Unlock()
+
+	reg.mu.RLock()
+	instance, started := reg.instance, reg.started
+	reg.mu.RUnlock()
+
+	if instance == nil {
+		built, err := c.callFactory(rc, reg)
+		if err != nil {
+			return nil, err
 		}
+
+		instance = built
+
+		reg.mu.Lock()
+		reg.instance = instance
+		reg.mu.Unlock()
+	}
+
+	if !started {
+		if err := c.startInstance(rc.context(), reg.name, instance); err != nil {
+			return nil, err
+		}
+
+		reg.mu.Lock()
+		reg.started = true
+		reg.mu.Unlock()
+
+		c.recordStarted(startedEntry{named: reg})
+	}
+
+	reg.ready.Store(true)
+
+	return instance, nil
+}
+
+// callFactory invokes a named factory with a container bound to rc.
+func (c *containerImpl) callFactory(rc resolveCtx, reg *serviceRegistration) (any, error) {
+	bound := c.bind(rc, reg)
+	defer bound.done.Store(true)
+
+	instance, err := reg.factory(bound)
+	if err != nil {
+		return nil, NewServiceError(reg.name, "resolve", err)
 	}
 
 	return instance, nil
 }
 
+// startInstance calls Start on instance if it implements di.Starter,
+// running the start middleware around it.
+func (c *containerImpl) startInstance(ctx context.Context, name string, instance any) error {
+	starter, ok := instance.(di.Starter)
+	if !ok {
+		return nil
+	}
+
+	mws := c.middleware.list()
+
+	if err := beforeStart(mws, ctx, name); err != nil {
+		return err
+	}
+
+	startErr := starter.Start(ctx)
+
+	if mwErr := afterStart(mws, ctx, name, startErr); mwErr != nil {
+		return mwErr
+	}
+
+	if startErr != nil {
+		return NewServiceError(name, "auto_start", startErr)
+	}
+
+	return nil
+}
+
+func (c *containerImpl) recordStarted(e startedEntry) {
+	c.lifeMu.Lock()
+	c.startOrder = append(c.startOrder, e)
+	c.lifeMu.Unlock()
+}
+
 // Use adds middleware to the container.
 // Middleware is called in the order they are added.
 func (c *containerImpl) Use(middleware Middleware) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.middleware.add(middleware)
 }
 
 // Has checks if a service is registered.
 func (c *containerImpl) Has(name string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	_, exists := c.services[name]
+	_, exists := c.lookup(name)
 
 	return exists
 }
@@ -245,10 +305,7 @@ func (c *containerImpl) Has(name string) bool {
 // IsStarted checks if a service has been started.
 // Returns false if service doesn't exist or hasn't been started.
 func (c *containerImpl) IsStarted(name string) bool {
-	c.mu.RLock()
-	reg, exists := c.services[name]
-	c.mu.RUnlock()
-
+	reg, exists := c.lookup(name)
 	if !exists {
 		return false
 	}
@@ -259,51 +316,38 @@ func (c *containerImpl) IsStarted(name string) bool {
 	return reg.started
 }
 
-// ResolveReady resolves a service, ensuring it and its dependencies are started first.
-// This is useful during extension Register() phase when you need a dependency
-// to be fully initialized before use.
+// ResolveReady resolves a service, ensuring it is started first.
+// ctx is passed to the service's Start method and to middleware.
 func (c *containerImpl) ResolveReady(ctx context.Context, name string) (any, error) {
-	c.mu.RLock()
-	reg, exists := c.services[name]
-	c.mu.RUnlock()
+	return c.resolveReady(resolveCtx{ctx: ctx}, name)
+}
 
-	if !exists {
+func (c *containerImpl) resolveReady(rc resolveCtx, name string) (any, error) {
+	if _, exists := c.lookup(name); !exists {
 		return nil, ErrServiceNotFound(name)
 	}
 
-	// Check if already started
-	reg.mu.RLock()
-	started := reg.started
-	reg.mu.RUnlock()
-
-	// If not started, start the service (and its dependencies via startService)
-	if !started {
-		if err := c.startService(ctx, name); err != nil {
+	if !c.IsStarted(name) {
+		if err := c.startService(rc, name); err != nil {
 			return nil, NewServiceError(name, "start", err)
 		}
 	}
 
-	// Now resolve the service
-	return c.Resolve(name)
+	return c.resolveNamed(rc, name)
 }
 
-// Services returns all registered service names.
+// Services returns all registered service names, sorted.
 // Named-registry services are always included (developer explicitly named them).
 // Type-registry services are only included if they implement di.HealthChecker,
 // which is the minimum contract for a type-registered component to be
 // considered a "service" for dashboard and inspection purposes.
 func (c *containerImpl) Services() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	nameSet := make(map[string]bool)
 
-	// Named registry: always include (developer explicitly registered by name)
-	for name := range c.services {
-		nameSet[name] = true
+	for _, reg := range c.registrations() {
+		nameSet[reg.name] = true
 	}
 
-	// Type registry: only health-capable registrations
 	if c.typeRegistry != nil {
 		for _, name := range c.typeRegistry.healthCapableNames() {
 			nameSet[name] = true
@@ -315,6 +359,8 @@ func (c *containerImpl) Services() []string {
 		names = append(names, name)
 	}
 
+	sort.Strings(names)
+
 	return names
 }
 
@@ -323,61 +369,57 @@ func (c *containerImpl) BeginScope() Scope {
 	return newScope(c)
 }
 
-// Start initializes all services in dependency order.
-// This method is idempotent - it will skip already-started services and
-// won't error if the container is already marked as started.
+// Start starts every singleton in dependency order: named singletons first,
+// following their declared eager dependencies, then any type-registered
+// singleton that has already been built. Type-registered services that have
+// not been built yet stay lazy and start on first Inject.
+//
+// If a service fails to start, everything already started is stopped again
+// in reverse order before the error is returned. Start is idempotent.
 func (c *containerImpl) Start(ctx context.Context) error {
 	c.mu.Lock()
 
-	// Idempotent: if already started, just return success
 	if c.started {
 		c.mu.Unlock()
 
 		return nil
 	}
 
-	// Get services in dependency order
-	order, err := c.graph.TopologicalSort()
-	if err != nil {
-		c.mu.Unlock()
-
-		return err
-	}
+	// Lazy dependencies are resolved on demand, so they don't constrain order.
+	order, err := c.graph.TopologicalSortEagerOnly()
 
 	c.mu.Unlock()
 
-	// Start named-registry services in dependency order
+	if err != nil {
+		return err
+	}
+
+	rc := resolveCtx{ctx: ctx}
+
 	for _, name := range order {
-		if err := c.startService(ctx, name); err != nil {
-			// Rollback: stop already started services
-			c.stopServices(ctx, order)
+		if err := c.startService(rc, name); err != nil {
+			_ = c.stopAll(ctx)
 
 			return NewServiceError(name, "start", err)
 		}
 	}
 
-	// Start type-registry services that implement di.Starter
 	if c.typeRegistry != nil {
-		c.typeRegistry.mu.RLock()
-		for _, reg := range c.typeRegistry.services {
+		for _, reg := range c.typeRegistry.registrations() {
 			reg.mu.RLock()
-			instance := reg.instance
-			started := reg.started
+			pending := reg.lifecycle == lifecycleSingleton && reg.instance != nil && !reg.started
 			reg.mu.RUnlock()
 
-			if instance != nil && !started {
-				if starter, ok := instance.(di.Starter); ok {
-					if err := starter.Start(ctx); err != nil {
-						c.typeRegistry.mu.RUnlock()
-						return NewServiceError(reg.key.String(), "start", err)
-					}
-					reg.mu.Lock()
-					reg.started = true
-					reg.mu.Unlock()
-				}
+			if !pending {
+				continue
+			}
+
+			if _, err := reg.resolve(c, rc); err != nil {
+				_ = c.stopAll(ctx)
+
+				return NewServiceError(reg.displayName(), "start", err)
 			}
 		}
-		c.typeRegistry.mu.RUnlock()
 	}
 
 	c.mu.Lock()
@@ -387,153 +429,135 @@ func (c *containerImpl) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop shuts down all services in reverse order.
+// Stop stops every started singleton in the reverse of the order it was
+// started, including services that were auto-started by Resolve or Inject
+// without a call to Start. It keeps going when a service fails to stop and
+// returns all failures joined together.
 func (c *containerImpl) Stop(ctx context.Context) error {
-	c.mu.Lock()
-
-	if !c.started {
-		c.mu.Unlock()
-
-		return nil // Not an error, just no-op
-	}
-
-	// Get services in dependency order, then reverse
-	order, err := c.graph.TopologicalSort()
-	if err != nil {
-		c.mu.Unlock()
-
-		return err
-	}
-
-	c.mu.Unlock()
-
-	// Stop type-registry services first (they were started last)
-	if c.typeRegistry != nil {
-		c.typeRegistry.mu.RLock()
-		for _, reg := range c.typeRegistry.services {
-			reg.mu.RLock()
-			instance := reg.instance
-			started := reg.started
-			reg.mu.RUnlock()
-
-			if instance != nil && started {
-				if stopper, ok := instance.(di.Stopper); ok {
-					if err := stopper.Stop(ctx); err != nil {
-						c.typeRegistry.mu.RUnlock()
-						return NewServiceError(reg.key.String(), "stop", err)
-					}
-					reg.mu.Lock()
-					reg.started = false
-					reg.mu.Unlock()
-				}
-			}
-		}
-		c.typeRegistry.mu.RUnlock()
-	}
-
-	// Stop named-registry services in reverse dependency order
-	for i := len(order) - 1; i >= 0; i-- {
-		name := order[i]
-		if err := c.stopService(ctx, name); err != nil {
-			return NewServiceError(name, "stop", err)
-		}
-	}
+	err := c.stopAll(ctx)
 
 	c.mu.Lock()
 	c.started = false
 	c.mu.Unlock()
 
-	return nil
+	return err
 }
 
-// Health checks all services that implement di.HealthChecker.
-func (c *containerImpl) Health(ctx context.Context) error {
-	c.mu.RLock()
+// stopAll stops every recorded started singleton in reverse start order.
+func (c *containerImpl) stopAll(ctx context.Context) error {
+	c.lifeMu.Lock()
+	entries := c.startOrder
+	c.startOrder = nil
+	c.lifeMu.Unlock()
 
-	// Check named-registry services
-	for name, reg := range c.services {
-		// Only check singleton services that have been instantiated
-		if !reg.singleton || reg.instance == nil {
-			continue
-		}
+	var errs []error
 
-		if checker, ok := reg.instance.(di.HealthChecker); ok {
-			if err := checker.Health(ctx); err != nil {
-				c.mu.RUnlock()
-				return NewServiceError(name, "health", err)
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+
+		switch {
+		case e.named != nil:
+			if err := stopRegistration(ctx, &e.named.mu, &e.named.ready, &e.named.instance, &e.named.started); err != nil {
+				errs = append(errs, NewServiceError(e.named.name, "stop", err))
+			}
+		case e.typed != nil:
+			if err := stopRegistration(ctx, &e.typed.mu, &e.typed.ready, &e.typed.instance, &e.typed.started); err != nil {
+				errs = append(errs, NewServiceError(e.typed.displayName(), "stop", err))
 			}
 		}
 	}
 
-	c.mu.RUnlock()
+	return errors.Join(errs...)
+}
 
-	// Check type-registry services
+// stopRegistration calls Stop on a started instance and marks it stopped.
+// The service is marked stopped even if Stop fails, so Start can retry it.
+func stopRegistration(ctx context.Context, mu *sync.RWMutex, ready *atomic.Bool, instance *any, started *bool) error {
+	mu.Lock()
+	inst, wasStarted := *instance, *started
+	*started = false
+	ready.Store(false)
+	mu.Unlock()
+
+	if !wasStarted || inst == nil {
+		return nil
+	}
+
+	if stopper, ok := inst.(di.Stopper); ok {
+		return stopper.Stop(ctx)
+	}
+
+	return nil
+}
+
+// Health checks all built singletons that implement di.HealthChecker, in
+// registration order. It returns the first failure.
+func (c *containerImpl) Health(ctx context.Context) error {
+	for _, reg := range c.registrations() {
+		if !reg.singleton {
+			continue
+		}
+
+		reg.mu.RLock()
+		instance := reg.instance
+		reg.mu.RUnlock()
+
+		if checker, ok := instance.(di.HealthChecker); ok {
+			if err := checker.Health(ctx); err != nil {
+				return NewServiceError(reg.name, "health", err)
+			}
+		}
+	}
+
 	if c.typeRegistry != nil {
-		c.typeRegistry.mu.RLock()
-		for _, reg := range c.typeRegistry.services {
+		for _, reg := range c.typeRegistry.registrations() {
 			reg.mu.RLock()
 			instance := reg.instance
 			reg.mu.RUnlock()
 
-			if instance == nil {
-				continue
-			}
-
 			if checker, ok := instance.(di.HealthChecker); ok {
-				serviceName := di.ServiceName(instance)
 				if err := checker.Health(ctx); err != nil {
-					c.typeRegistry.mu.RUnlock()
-					return NewServiceError(serviceName, "health", err)
+					return NewServiceError(di.ServiceName(instance), "health", err)
 				}
 			}
 		}
-		c.typeRegistry.mu.RUnlock()
 	}
 
 	return nil
 }
 
 // Inspect returns diagnostic information about a service.
+// If the service has been built and implements di.HealthChecker, its Health
+// method is called to fill in Healthy.
 func (c *containerImpl) Inspect(name string) ServiceInfo {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	reg, exists := c.services[name]
+	reg, exists := c.lookup(name)
 	if !exists {
-		// Check type registry for type-based registrations
 		return c.inspectTypeRegistry(name)
 	}
 
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-
-	lifecycle := "transient"
+	lifecycle := lifecycleTransient
 	if reg.singleton {
-		lifecycle = "singleton"
+		lifecycle = lifecycleSingleton
 	} else if reg.scoped {
-		lifecycle = "scoped"
+		lifecycle = lifecycleScoped
 	}
+
+	reg.mu.RLock()
+	instance, started := reg.instance, reg.started
+	reg.mu.RUnlock()
 
 	typeName := "unknown"
-	if reg.instance != nil {
-		typeName = fmt.Sprintf("%T", reg.instance)
+	if instance != nil {
+		typeName = fmt.Sprintf("%T", instance)
 	}
 
-	healthy := false
-	if checker, ok := reg.instance.(di.HealthChecker); ok {
-		healthy = checker.Health(context.Background()) == nil
-	}
-
-	// Copy metadata and add groups
-	metadata := make(map[string]string)
+	metadata := make(map[string]string, len(reg.metadata)+1)
 	for k, v := range reg.metadata {
 		metadata[k] = v
 	}
 
-	// Store groups in metadata for query purposes
 	if len(reg.groups) > 0 {
-		// Store groups as comma-separated string
-		metadata["__groups"] = joinStrings(reg.groups, ",")
+		metadata[groupsMetadataKey] = strings.Join(reg.groups, ",")
 	}
 
 	return ServiceInfo{
@@ -542,8 +566,8 @@ func (c *containerImpl) Inspect(name string) ServiceInfo {
 		Lifecycle:    lifecycle,
 		Dependencies: reg.dependencies,
 		Deps:         reg.deps,
-		Started:      reg.started,
-		Healthy:      healthy,
+		Started:      started,
+		Healthy:      isHealthy(instance),
 		Metadata:     metadata,
 	}
 }
@@ -554,123 +578,60 @@ func (c *containerImpl) inspectTypeRegistry(name string) ServiceInfo {
 		return ServiceInfo{Name: name}
 	}
 
-	c.typeRegistry.mu.RLock()
-	defer c.typeRegistry.mu.RUnlock()
-
-	// Search for the registration matching this name
-	for key, reg := range c.typeRegistry.services {
-		serviceName := deriveServiceName(key)
-		if serviceName != name {
-			continue
-		}
-
-		reg.mu.RLock()
-		typeName := key.typ.String()
-		lifecycle := reg.lifecycle
-		if lifecycle == "" {
-			lifecycle = "singleton"
-		}
-
-		healthy := false
-		if reg.instance != nil {
-			if checker, ok := reg.instance.(di.HealthChecker); ok {
-				healthy = checker.Health(context.Background()) == nil
-			}
-		}
-
-		started := reg.started
-		reg.mu.RUnlock()
-
-		metadata := make(map[string]string)
-		if len(reg.groups) > 0 {
-			metadata["__groups"] = joinStrings(reg.groups, ",")
-		}
-
-		return ServiceInfo{
-			Name:      name,
-			Type:      typeName,
-			Lifecycle: lifecycle,
-			Started:   started,
-			Healthy:   healthy,
-			Metadata:  metadata,
-		}
+	reg, key, ok := c.typeRegistry.findByName(name)
+	if !ok {
+		return ServiceInfo{Name: name}
 	}
-
-	return ServiceInfo{Name: name}
-}
-
-// startService starts a single service.
-// This is idempotent - if the service is already started (via auto-start on Resolve),
-// it will be skipped.
-func (c *containerImpl) startService(ctx context.Context, name string) error {
-	c.mu.RLock()
-	reg, exists := c.services[name]
-	c.mu.RUnlock()
-
-	if !exists {
-		return nil // Service not registered, skip
-	}
-
-	// Check if already started
-	reg.mu.RLock()
-	started := reg.started
-	reg.mu.RUnlock()
-
-	if started {
-		return nil // Already started (via auto-start on Resolve), skip
-	}
-
-	// Resolve the service instance (creates and auto-starts if needed)
-	_, err := c.Resolve(name)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// stopService stops a single service.
-func (c *containerImpl) stopService(ctx context.Context, name string) error {
-	reg := c.services[name]
 
 	reg.mu.RLock()
-	instance := reg.instance
-	started := reg.started
+	instance, started := reg.instance, reg.started
 	reg.mu.RUnlock()
 
-	if !started || instance == nil {
+	metadata := make(map[string]string)
+	if len(reg.groups) > 0 {
+		metadata[groupsMetadataKey] = strings.Join(reg.groups, ",")
+	}
+
+	return ServiceInfo{
+		Name:      name,
+		Type:      key.typ.String(),
+		Lifecycle: reg.lifecycle,
+		Started:   started,
+		Healthy:   isHealthy(instance),
+		Metadata:  metadata,
+	}
+}
+
+// isHealthy runs a health check if instance supports one. No locks are held
+// while it runs, so a health check may safely use the container.
+func isHealthy(instance any) bool {
+	checker, ok := instance.(di.HealthChecker)
+	if !ok {
+		return false
+	}
+
+	return checker.Health(context.Background()) == nil
+}
+
+// startService starts a single named singleton if it isn't started yet.
+// Scoped and transient services are skipped: they have no app-wide instance.
+func (c *containerImpl) startService(rc resolveCtx, name string) error {
+	reg, exists := c.lookup(name)
+	if !exists || !reg.singleton {
 		return nil
 	}
 
-	// Call Stop if service implements di.Stopper
-	if stopper, ok := instance.(di.Stopper); ok {
-		if err := stopper.Stop(ctx); err != nil {
-			return err
-		}
+	_, err := c.resolveNamed(rc, name)
 
-		reg.mu.Lock()
-		reg.started = false
-		reg.mu.Unlock()
-	}
-
-	return nil
+	return err
 }
 
-// stopServices stops multiple services (for rollback).
-func (c *containerImpl) stopServices(ctx context.Context, names []string) {
-	for i := len(names) - 1; i >= 0; i-- {
-		_ = c.stopService(ctx, names[i])
+// stopService stops a single named service if it was started.
+func (c *containerImpl) stopService(ctx context.Context, name string) error {
+	reg, exists := c.lookup(name)
+	if !exists {
+		return nil
 	}
-}
 
-// joinStrings is a helper to join strings.
-func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for i := 1; i < len(strs); i++ {
-		result += sep + strs[i]
-	}
-	return result
+	return stopRegistration(ctx, &reg.mu, &reg.ready, &reg.instance, &reg.started)
 }

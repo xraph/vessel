@@ -1,6 +1,11 @@
 package vessel
 
-import "context"
+import (
+	"context"
+	"slices"
+	"sync"
+	"sync/atomic"
+)
 
 // Middleware provides hooks for intercepting container operations.
 // Middleware can be used for logging, metrics, security, testing, etc.
@@ -23,25 +28,34 @@ type Middleware interface {
 }
 
 // middlewareChain manages multiple middleware.
+// The list is copy-on-write: Use replaces it, and every resolve reads the
+// current list with a single atomic load and no copying.
 type middlewareChain struct {
-	middleware []Middleware
-}
-
-// newMiddlewareChain creates a new middleware chain.
-func newMiddlewareChain() *middlewareChain {
-	return &middlewareChain{
-		middleware: make([]Middleware, 0),
-	}
+	middleware atomic.Pointer[[]Middleware]
+	mu         sync.Mutex // serializes writers
 }
 
 // add appends middleware to the chain.
 func (m *middlewareChain) add(middleware Middleware) {
-	m.middleware = append(m.middleware, middleware)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	next := append(slices.Clone(m.list()), middleware)
+	m.middleware.Store(&next)
 }
 
-// beforeResolve calls BeforeResolve on all middleware.
-func (m *middlewareChain) beforeResolve(ctx context.Context, name string) error {
-	for _, mw := range m.middleware {
+// list returns the current middleware. Callers must not modify it.
+func (m *middlewareChain) list() []Middleware {
+	if p := m.middleware.Load(); p != nil {
+		return *p
+	}
+
+	return nil
+}
+
+// beforeResolve calls BeforeResolve on each middleware in mws.
+func beforeResolve(mws []Middleware, ctx context.Context, name string) error {
+	for _, mw := range mws {
 		if err := mw.BeforeResolve(ctx, name); err != nil {
 			return err
 		}
@@ -49,9 +63,9 @@ func (m *middlewareChain) beforeResolve(ctx context.Context, name string) error 
 	return nil
 }
 
-// afterResolve calls AfterResolve on all middleware.
-func (m *middlewareChain) afterResolve(ctx context.Context, name string, service any, err error) error {
-	for _, mw := range m.middleware {
+// afterResolve calls AfterResolve on each middleware in mws.
+func afterResolve(mws []Middleware, ctx context.Context, name string, service any, err error) error {
+	for _, mw := range mws {
 		if mwErr := mw.AfterResolve(ctx, name, service, err); mwErr != nil {
 			return mwErr
 		}
@@ -59,9 +73,9 @@ func (m *middlewareChain) afterResolve(ctx context.Context, name string, service
 	return nil
 }
 
-// beforeStart calls BeforeStart on all middleware.
-func (m *middlewareChain) beforeStart(ctx context.Context, name string) error {
-	for _, mw := range m.middleware {
+// beforeStart calls BeforeStart on each middleware in mws.
+func beforeStart(mws []Middleware, ctx context.Context, name string) error {
+	for _, mw := range mws {
 		if err := mw.BeforeStart(ctx, name); err != nil {
 			return err
 		}
@@ -69,9 +83,9 @@ func (m *middlewareChain) beforeStart(ctx context.Context, name string) error {
 	return nil
 }
 
-// afterStart calls AfterStart on all middleware.
-func (m *middlewareChain) afterStart(ctx context.Context, name string, err error) error {
-	for _, mw := range m.middleware {
+// afterStart calls AfterStart on each middleware in mws.
+func afterStart(mws []Middleware, ctx context.Context, name string, err error) error {
+	for _, mw := range mws {
 		if mwErr := mw.AfterStart(ctx, name, err); mwErr != nil {
 			return mwErr
 		}

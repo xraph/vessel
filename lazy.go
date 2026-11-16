@@ -3,6 +3,7 @@ package vessel
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xraph/go-utils/di"
 )
@@ -16,7 +17,7 @@ type Lazy[T any] struct {
 	mu        sync.Once
 	value     T
 	err       error
-	resolved  bool
+	resolved  atomic.Bool
 }
 
 // NewLazy creates a new lazy dependency wrapper.
@@ -28,7 +29,8 @@ func NewLazy[T any](container di.Container, name string) *Lazy[T] {
 }
 
 // Get resolves the dependency and returns it.
-// The resolution happens only once; subsequent calls return the cached value.
+// The resolution happens only once; subsequent calls return the cached value,
+// or the cached error if the first resolution failed.
 func (l *Lazy[T]) Get() (T, error) {
 	l.mu.Do(func() {
 		instance, err := l.container.Resolve(l.name)
@@ -48,7 +50,7 @@ func (l *Lazy[T]) Get() (T, error) {
 		}
 
 		l.value = typed
-		l.resolved = true
+		l.resolved.Store(true)
 	})
 
 	return l.value, l.err
@@ -64,9 +66,9 @@ func (l *Lazy[T]) MustGet() T {
 	return value
 }
 
-// IsResolved returns true if the dependency has been resolved.
+// IsResolved returns true if the dependency has been resolved successfully.
 func (l *Lazy[T]) IsResolved() bool {
-	return l.resolved
+	return l.resolved.Load()
 }
 
 // Name returns the name of the dependency.
@@ -82,8 +84,8 @@ type OptionalLazy[T any] struct {
 	mu        sync.Once
 	value     T
 	err       error
-	resolved  bool
-	found     bool
+	resolved  atomic.Bool
+	found     atomic.Bool
 }
 
 // NewOptionalLazy creates a new optional lazy dependency wrapper.
@@ -99,8 +101,7 @@ func NewOptionalLazy[T any](container di.Container, name string) *OptionalLazy[T
 func (l *OptionalLazy[T]) Get() (T, error) {
 	l.mu.Do(func() {
 		if !l.container.Has(l.name) {
-			l.resolved = true
-			l.found = false
+			l.resolved.Store(true)
 
 			return
 		}
@@ -122,8 +123,8 @@ func (l *OptionalLazy[T]) Get() (T, error) {
 		}
 
 		l.value = typed
-		l.resolved = true
-		l.found = true
+		l.found.Store(true)
+		l.resolved.Store(true)
 	})
 
 	return l.value, l.err
@@ -142,12 +143,12 @@ func (l *OptionalLazy[T]) MustGet() T {
 
 // IsResolved returns true if the dependency has been resolved.
 func (l *OptionalLazy[T]) IsResolved() bool {
-	return l.resolved
+	return l.resolved.Load()
 }
 
 // IsFound returns true if the dependency was found (only valid after resolution).
 func (l *OptionalLazy[T]) IsFound() bool {
-	return l.found
+	return l.found.Load()
 }
 
 // Name returns the name of the dependency.
