@@ -489,6 +489,7 @@ func ProvideValue[T any](c Vessel, value T, opts ...ConstructorOption) error {
 		instance:      value,
 		lifecycle:     lifecycleSingleton,
 		healthCapable: isHealthCapable,
+		value:         true,
 	}
 
 	if config.group != "" {
