@@ -741,3 +741,25 @@ func TestProvide_ResolveStillStartsBuiltSingleton(t *testing.T) {
 	require.NoError(t, c.Start(context.Background()))
 	assert.EqualValues(t, 1, svc.starts.Load(), "Start must not start it again")
 }
+
+// A provided value whose Start fails fails Container.Start, and whatever had
+// already started is stopped again.
+func TestProvideValue_StartFailureRollsBack(t *testing.T) {
+	c := New()
+	var (
+		log []string
+		mu  sync.Mutex
+	)
+	require.NoError(t, c.Register("first", func(Vessel) (any, error) {
+		return &regStarter{name: "first", log: &log, mu: &mu}, nil
+	}))
+	require.NoError(t, ProvideValue(c, &mockService{name: "value", startErr: errors.New("nope")}))
+	_, err := Inject[*mockService](c)
+	require.NoError(t, err, "resolving the value must not start it, so it can't fail here")
+
+	err = c.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nope")
+	assert.Equal(t, []string{"start first", "stop first"}, log)
+	assert.Empty(t, c.(*containerImpl).startOrder, "everything started must be rolled back")
+}
