@@ -45,11 +45,19 @@ type typeRegistration struct {
 	groups        []string
 	healthCapable bool // true if return type implements di.HealthChecker
 	started       bool // tracks lifecycle state for Start/Stop
-	mu            sync.RWMutex
-	initMu        sync.Mutex // held while building and starting the singleton
 
-	// ready is set once the singleton is built and started, and cleared by
-	// Stop. When set, instance can be read without locking.
+	// value marks a registration whose instance the caller built and handed
+	// over (ProvideValue). Resolving it returns the value as it is: the
+	// caller decides when it starts, and Container.Start starts it with the
+	// rest. Auto-starting it on resolve would run its Start whenever anything
+	// first asks for it, which can be long before what it needs is ready.
+	value  bool
+	mu     sync.RWMutex
+	initMu sync.Mutex // held while building and starting the singleton
+
+	// ready is set once the singleton is built and started (or, for a value,
+	// first resolved), and cleared by Stop. When set, instance can be read
+	// without locking.
 	ready atomic.Bool
 }
 
@@ -275,13 +283,15 @@ func (reg *typeRegistration) resolve(c *containerImpl, rc resolveCtx) (any, erro
 		return instance, nil
 
 	default:
-		return reg.resolveSingleton(c, rc.withoutScope())
+		return reg.resolveSingleton(c, rc.withoutScope(), false)
 	}
 }
 
 // resolveSingleton builds and starts the singleton exactly once. Concurrent
-// first resolutions wait for each other instead of failing.
-func (reg *typeRegistration) resolveSingleton(c *containerImpl, rc resolveCtx) (any, error) {
+// first resolutions wait for each other instead of failing. A value given to
+// ProvideValue is started only when fromStart is set, that is when
+// Container.Start reaches it, never by a plain resolve.
+func (reg *typeRegistration) resolveSingleton(c *containerImpl, rc resolveCtx, fromStart bool) (any, error) {
 	reg.initMu.Lock()
 	defer reg.initMu.Unlock()
 
@@ -302,7 +312,7 @@ func (reg *typeRegistration) resolveSingleton(c *containerImpl, rc resolveCtx) (
 		reg.mu.Unlock()
 	}
 
-	if !started {
+	if !started && (fromStart || !reg.value) {
 		if err := startTyped(rc, reg, instance); err != nil {
 			return nil, err
 		}

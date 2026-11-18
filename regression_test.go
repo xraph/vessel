@@ -610,7 +610,9 @@ func TestStart_FailureRollsBackTypedServices(t *testing.T) {
 		mu  sync.Mutex
 	)
 	typed := &regStarter{name: "typed", log: &log, mu: &mu}
-	require.NoError(t, ProvideValue(c, typed))
+	// A constructor, not ProvideValue: a resolve starts what the container
+	// built, and that start is what the failed Start has to roll back.
+	require.NoError(t, Provide(c, func() (*regStarter, error) { return typed, nil }))
 	_ = MustInject[*regStarter](c)
 
 	require.NoError(t, c.Register("broken", func(Vessel) (any, error) {
@@ -691,4 +693,51 @@ func TestTypedErrors_CarryNotFoundCode(t *testing.T) {
 	c := New()
 	_, err := Inject[*regImpl](c)
 	assert.ErrorIs(t, err, ErrServiceNotFoundSentinel)
+}
+
+// countingStarter counts its Start and Stop calls.
+type countingStarter struct{ starts, stops atomic.Int32 }
+
+func (s *countingStarter) Start(context.Context) error { s.starts.Add(1); return nil }
+func (s *countingStarter) Stop(context.Context) error  { s.stops.Add(1); return nil }
+
+// A value handed to ProvideValue was built by its caller, who decides when it
+// starts. Resolving it must not start it: an app that resolves it while
+// extensions register would run its Start before the database is migrated.
+// Container.Start still starts it once, and Stop stops it.
+func TestProvideValue_ResolveDoesNotStart(t *testing.T) {
+	c := New()
+	svc := &countingStarter{}
+	require.NoError(t, ProvideValue(c, svc))
+
+	got, err := Inject[*countingStarter](c)
+	require.NoError(t, err)
+	assert.Same(t, svc, got)
+	_, err = Inject[*countingStarter](c)
+	require.NoError(t, err)
+	assert.Zero(t, svc.starts.Load(), "resolving a provided value must not start it")
+
+	require.NoError(t, c.Start(context.Background()))
+	assert.EqualValues(t, 1, svc.starts.Load(), "Container.Start starts the value once")
+
+	_, err = Inject[*countingStarter](c)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, svc.starts.Load())
+
+	require.NoError(t, c.Stop(context.Background()))
+	assert.EqualValues(t, 1, svc.stops.Load())
+}
+
+// A singleton the container builds is still started on its first resolve.
+func TestProvide_ResolveStillStartsBuiltSingleton(t *testing.T) {
+	c := New()
+	svc := &countingStarter{}
+	require.NoError(t, Provide(c, func() (*countingStarter, error) { return svc, nil }))
+
+	_, err := Inject[*countingStarter](c)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, svc.starts.Load())
+
+	require.NoError(t, c.Start(context.Background()))
+	assert.EqualValues(t, 1, svc.starts.Load(), "Start must not start it again")
 }

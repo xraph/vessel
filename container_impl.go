@@ -414,7 +414,10 @@ func (c *containerImpl) Start(ctx context.Context) error {
 				continue
 			}
 
-			if _, err := reg.resolve(c, rc); err != nil {
+			// Straight to resolveSingleton: a ProvideValue value that has
+			// been resolved is already marked ready, so resolve would hand
+			// it back without starting it.
+			if _, err := reg.resolveSingleton(c, rc, true); err != nil {
 				_ = c.stopAll(ctx)
 
 				return NewServiceError(reg.displayName(), "start", err)
