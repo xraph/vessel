@@ -1,3 +1,9 @@
+## [1.0.8](https://github.com/xraph/vessel/compare/v1.0.7...v1.0.8) (2026-11-18)
+
+### Bug Fixes
+
+* don't start ProvideValue values when they are resolved ([#4](https://github.com/xraph/vessel/issues/4)) ([708f1e4](https://github.com/xraph/vessel/commit/708f1e47b1d6c56fed6217c9ddb018e7bc529cf4))
+
 ## [1.0.7](https://github.com/xraph/vessel/compare/v1.0.6...v1.0.7) (2026-11-16)
 
 ### Bug Fixes
